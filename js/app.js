@@ -33,6 +33,38 @@ async function persist() {
   }
 }
 
+// ── modal ──────────────────────────────────────────────────────
+
+function showModal(title, message, details) {
+  // Remove any existing modal
+  const existing = document.getElementById('pack-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'pack-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-box">
+      <div class="modal-icon">⚠️</div>
+      <div class="modal-title">${title}</div>
+      <div class="modal-msg">${message}</div>
+      ${details ? `<div class="modal-details">${details}</div>` : ''}
+      <button class="btn btn--primary modal-close" onclick="closeModal()">OK, rozumiem</button>
+    </div>`;
+
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  document.body.appendChild(modal);
+  // Animate in
+  requestAnimationFrame(() => modal.classList.add('modal-visible'));
+}
+
+function closeModal() {
+  const modal = document.getElementById('pack-modal');
+  if (!modal) return;
+  modal.classList.remove('modal-visible');
+  setTimeout(() => modal.remove(), 200);
+}
+
 // ── tabs ───────────────────────────────────────────────────────
 
 function switchTab(name) {
@@ -81,10 +113,44 @@ function addToOrder(id) {
   if (ex) ex.qty++;
   else    S.order.push({ ...p, qty: 1 });
 
-  renderOrder();
-  refreshScene();
-  document.getElementById('bproposal').style.display  = 'none';
+  // Reset confirmed box — order changed
+  S.confBox = null;
   document.getElementById('bconfirmed').style.display = 'none';
+  document.getElementById('bproposal').style.display  = 'none';
+
+  renderOrder();
+
+  // Check if anything fits — show modal immediately if not
+  const items = flattenOrder();
+  if (items.length) {
+    const result = packResult();
+    if (!result) {
+      const totalWgt  = items.reduce((a, i) => a + i.waga, 0);
+      const heaviestBox = S.boxes.length ? [...S.boxes].sort((a, b) => b.maxW - a.maxW)[0] : null;
+      const biggestBox  = S.boxes.length ? [...S.boxes].sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h))[0] : null;
+      let reason = '';
+      if (!S.boxes.length) {
+        reason = 'Brak zdefiniowanych kartonów. Dodaj kartony w zakładce <strong>Kartony</strong>.';
+      } else if (heaviestBox && totalWgt + heaviestBox.ow > heaviestBox.maxW) {
+        reason = `Łączna waga produktów (<strong>${totalWgt.toFixed(2)} kg</strong>) przekracza nośność największego kartonu (max ${heaviestBox.maxW} kg).`;
+      } else if (biggestBox) {
+        const itemVol = items.reduce((a, i) => a + i.l * i.w * i.h, 0);
+        const boxVol  = biggestBox.l * biggestBox.w * biggestBox.h;
+        if (itemVol > boxVol) {
+          reason = `Objętość produktów (<strong>${(itemVol / 1000).toFixed(1)} l</strong>) przekracza pojemność największego kartonu (${(boxVol / 1000).toFixed(1)} l).`;
+        } else {
+          reason = `Wymiary poszczególnych produktów uniemożliwiają ułożenie ich w żadnym dostępnym kartonie.<br>Największy dostępny: <strong>${biggestBox.name}</strong> ${biggestBox.l}×${biggestBox.w}×${biggestBox.h} cm.`;
+        }
+      }
+      showModal(
+        'Brak pasującego kartonu',
+        `Dodanie <strong>${p.name}</strong> powoduje, że zamówienie nie mieści się w żadnym kartonie.`,
+        reason + '<br><br>Możliwe rozwiązania:<br>• Zmniejsz ilość produktów<br>• Dodaj większy karton w zakładce <strong>Kartony</strong>'
+      );
+    }
+  }
+
+  refreshScene();
 }
 
 function chgQty(id, delta) {
@@ -92,12 +158,18 @@ function chgQty(id, delta) {
   if (!item) return;
   item.qty = Math.max(0, item.qty + delta);
   if (!item.qty) S.order = S.order.filter(x => x.id !== id);
+  S.confBox = null;
+  document.getElementById('bconfirmed').style.display = 'none';
+  document.getElementById('bproposal').style.display  = 'none';
   renderOrder();
   refreshScene();
 }
 
 function rmOrder(id) {
   S.order = S.order.filter(x => x.id !== id);
+  S.confBox = null;
+  document.getElementById('bconfirmed').style.display = 'none';
+  document.getElementById('bproposal').style.display  = 'none';
   renderOrder();
   refreshScene();
 }
@@ -129,59 +201,106 @@ function renderOrder() {
   document.getElementById('titms').textContent = totalI + ' szt.';
 }
 
-// ── bin packing ────────────────────────────────────────────────
+// ── bin packing (improved) ─────────────────────────────────────
+
+// All 6 possible orientations of a box (l, w, h)
+function getOrientations(item) {
+  const { l, w, h } = item;
+  return [
+    { l, w, h },
+    { l: l, w: h, h: w },
+    { l: w, w: l, h },
+    { l: w, w: h, h: l },
+    { l: h, w: l, h: w },
+    { l: h, w: w, h: l },
+  ].filter(o => o.l > 0 && o.w > 0 && o.h > 0);
+}
+
+// Guillotine shelf packing, bottom-to-top, largest footprint first
+// items should already be sorted largest-first by caller (flattenOrder)
+function packIntoBox(items, boxL, boxW, boxH) {
+  // Re-sort by footprint area descending to ensure largest on bottom
+  const sorted = [...items].sort((a, b) => (b.l * b.w) - (a.l * a.w));
+
+  const placements = [];
+  // layers stack from z=0 upward
+  // Each layer: { z, height, shelves: [{y, depth, curX}] }
+  const layers = [];
+
+  function tryPlace(item) {
+    const orientations = getOrientations(item);
+
+    // Try to fit in existing layers (bottom first)
+    for (const layer of layers) {
+      for (const o of orientations) {
+        const { l: il, w: iw, h: ih } = o;
+        if (il > boxL || iw > boxW) continue;
+
+        // Try each shelf in this layer
+        for (const shelf of layer.shelves) {
+          if (ih > layer.height) continue; // item is taller than layer
+          if (iw > shelf.depth) continue;  // item is deeper than shelf row
+          if (shelf.curX + il <= boxL) {
+            placements.push({ x: shelf.curX, y: shelf.y, z: layer.z, l: il, w: iw, h: ih });
+            shelf.curX += il;
+            return true;
+          }
+        }
+
+        // Try a new shelf row in this layer
+        const lastShelf = layer.shelves[layer.shelves.length - 1];
+        const usedDepth = lastShelf ? lastShelf.y + lastShelf.depth : 0;
+        if (ih <= layer.height && usedDepth + iw <= boxW && il <= boxL) {
+          layer.shelves.push({ y: usedDepth, depth: iw, curX: il });
+          placements.push({ x: 0, y: usedDepth, z: layer.z, l: il, w: iw, h: ih });
+          return true;
+        }
+      }
+    }
+
+    // Need a new layer on top
+    const curZ = layers.length === 0 ? 0
+      : layers[layers.length - 1].z + layers[layers.length - 1].height;
+
+    for (const o of orientations) {
+      const { l: il, w: iw, h: ih } = o;
+      if (il > boxL || iw > boxW) continue;
+      if (curZ + ih > boxH) return false; // won't fit vertically
+
+      layers.push({ z: curZ, height: ih, shelves: [{ y: 0, depth: iw, curX: il }] });
+      placements.push({ x: 0, y: 0, z: curZ, l: il, w: iw, h: ih });
+      return true;
+    }
+    return false;
+  }
+
+  for (const item of sorted) {
+    if (!tryPlace(item)) return null; // item didn't fit anywhere
+  }
+
+  const totalH = layers.length === 0 ? 0
+    : layers[layers.length - 1].z + layers[layers.length - 1].height;
+
+  return { placements, totalH };
+}
 
 function flattenOrder() {
   const items = [];
   S.order.forEach(p => {
     for (let i = 0; i < p.qty; i++) {
-      items.push({ l: p.l || 10, w: p.w || 10, h: p.h || 3, waga: p.waga, name: p.name, sku: p.sku });
+      items.push({
+        l: p.l || 10,
+        w: p.w || 10,
+        h: p.h || 3,
+        waga: p.waga,
+        name: p.name,
+        sku: p.sku
+      });
     }
   });
+  // Sort by footprint area descending — largest on bottom
+  items.sort((a, b) => (b.l * b.w) - (a.l * a.w));
   return items;
-}
-
-function packIntoBox(items, boxL, boxW) {
-  // greedy shelf packing: place items row by row on each layer
-  // returns array of {x, y, z, l, w, h} placements or null if doesnt fit
-  const sorted = [...items].sort((a, b) => (b.l * b.w) - (a.l * a.w));
-  const placements = [];
-  let curZ = 0;
-
-  while (sorted.length > 0) {
-    // start new layer
-    const layerH = sorted[0].h;
-    let curX = 0, curY = 0, rowH = 0;
-
-    const remaining = [];
-    for (const item of sorted) {
-      if (item.l <= boxL && item.w <= boxW) {
-        // try to place in current row
-        if (curX + item.l <= boxL) {
-          placements.push({ x: curX, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
-          if (item.w > rowH) rowH = item.w;
-          curX += item.l;
-        } else if (curY + rowH + item.w <= boxW) {
-          // next row
-          curY += rowH;
-          curX  = item.l;
-          rowH  = item.w;
-          placements.push({ x: 0, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
-        } else {
-          remaining.push(item);
-        }
-      } else {
-        remaining.push(item);
-      }
-    }
-
-    if (remaining.length === sorted.length) return null; // nothing placed, infinite loop guard
-    sorted.length = 0;
-    sorted.push(...remaining);
-    curZ += layerH;
-  }
-
-  return { placements, totalH: curZ };
 }
 
 function packResult() {
@@ -189,21 +308,15 @@ function packResult() {
   if (!items.length) return null;
   const totalWgt = items.reduce((a, i) => a + i.waga, 0);
 
-  // find smallest fitting box
+  // Find smallest fitting box (sorted by volume)
   const candidates = S.boxes
     .filter(b => b.maxW >= totalWgt + b.ow)
     .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h);
 
   for (const box of candidates) {
-    const result = packIntoBox(items, box.l, box.w);
-    if (result && result.totalH <= box.h) {
+    const result = packIntoBox(items, box.l, box.w, box.h);
+    if (result) {
       return { box, placements: result.placements, totalH: result.totalH, totalWgt };
-    }
-    // try rotated items
-    const rotated = items.map(i => ({ ...i, l: i.w, w: i.l }));
-    const result2 = packIntoBox(rotated, box.l, box.w);
-    if (result2 && result2.totalH <= box.h) {
-      return { box, placements: result2.placements, totalH: result2.totalH, totalWgt };
     }
   }
   return null;
@@ -221,7 +334,32 @@ function getBB() {
 
 function guessBestBox() {
   const result = packResult();
-  return result ? result.box : (S.boxes[S.boxes.length - 1] || null);
+  return result ? result.box : null;
+}
+
+// ── no-fit banner (shown in 3D panel when nothing fits) ────────
+function showNoFitBanner(items) {
+  const el = document.getElementById('nofit-banner');
+  if (!el) return;
+  if (!items || !items.length) { el.style.display = 'none'; return; }
+
+  const totalWgt = items.reduce((a, i) => a + i.waga, 0);
+  const heaviest = S.boxes.reduce((mx, b) => b.maxW > mx ? b.maxW : mx, 0);
+  let reason = '';
+  if (!S.boxes.length) {
+    reason = 'Brak zdefiniowanych kartonów.';
+  } else if (totalWgt > heaviest) {
+    reason = `Za ciężkie (${totalWgt.toFixed(2)} kg > max ${heaviest} kg).`;
+  } else {
+    reason = 'Wymiary produktów nie pasują do żadnego kartonu.';
+  }
+  el.innerHTML = `⚠️ Brak pasującego kartonu &mdash; ${reason}`;
+  el.style.display = 'block';
+}
+
+function hideNoFitBanner() {
+  const el = document.getElementById('nofit-banner');
+  if (el) el.style.display = 'none';
 }
 
 // ── box proposal ───────────────────────────────────────────────
@@ -238,30 +376,48 @@ function proposeBox() {
     .filter(b => b.maxW >= totalWgt + b.ow)
     .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h)
     .forEach(b => {
-      const r = packIntoBox(items, b.l, b.w);
-      if (r && r.totalH <= b.h) {
+      const r = packIntoBox(items, b.l, b.w, b.h);
+      if (r) {
         fitting.push({ box: b, placements: r.placements, totalH: r.totalH });
-        return;
-      }
-      const rot = items.map(i => ({ ...i, l: i.w, w: i.l }));
-      const r2  = packIntoBox(rot, b.l, b.w);
-      if (r2 && r2.totalH <= b.h) {
-        fitting.push({ box: b, placements: r2.placements, totalH: r2.totalH });
       }
     });
 
   if (!fitting.length) {
-    optsEl.innerHTML = '<div class="alert aw">Zaden karton nie pasuje. Sprawdz wymiary lub dodaj wiekszy karton.</div>';
-    wrap.style.display = 'block';
+    // Diagnose why
+    const heaviestBox = S.boxes.sort((a, b) => b.maxW - a.maxW)[0];
+    const biggestBox  = S.boxes.sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h))[0];
+
+    let reason = '';
+    if (heaviestBox && totalWgt + heaviestBox.ow > heaviestBox.maxW) {
+      reason = `Łączna waga produktów (<strong>${totalWgt.toFixed(2)} kg</strong>) przekracza nośność największego kartonu (max ${heaviestBox.maxW} kg).`;
+    } else if (biggestBox) {
+      const itemVol = items.reduce((a, i) => a + i.l * i.w * i.h, 0);
+      const boxVol  = biggestBox.l * biggestBox.w * biggestBox.h;
+      if (itemVol > boxVol * 0.95) {
+        reason = `Objętość produktów (<strong>${(itemVol / 1000).toFixed(1)} l</strong>) jest większa niż pojemność największego kartonu (${(boxVol / 1000).toFixed(1)} l).`;
+      } else {
+        reason = `Wymiary poszczególnych produktów uniemożliwiają ułożenie ich w żadnym dostępnym kartonie.`;
+      }
+    } else {
+      reason = `Brak zdefiniowanych kartonów. Dodaj kartony w zakładce <strong>Kartony</strong>.`;
+    }
+
+    showModal(
+      'Brak pasującego kartonu',
+      'Produkty nie mieszczą się w żadnym dostępnym kartonie.',
+      reason + '<br><br>Możliwe rozwiązania:<br>• Zmniejsz ilość produktów<br>• Dodaj większy karton w zakładce Kartony<br>• Sprawdź wymiary produktów'
+    );
+
+    wrap.style.display = 'none';
     return;
   }
 
   optsEl.innerHTML = fitting.slice(0, 5).map(({ box: b, totalH }, i) => {
-    const vol  = b.l * b.w * b.h;
+    const vol     = b.l * b.w * b.h;
     const itemVol = items.reduce((a, it) => a + it.l * it.w * it.h, 0);
-    const fill = Math.round(itemVol / vol * 100);
-    const best = i === 0 ? ' best' : '';
-    const tag  = i === 0 ? '<span class="best-tag">najlepszy</span>' : '';
+    const fill    = Math.round(itemVol / vol * 100);
+    const best    = i === 0 ? ' best' : '';
+    const tag     = i === 0 ? '<span class="best-tag">najlepszy</span>' : '';
     return `<label class="bopt${best}">
       <input type="radio" name="bop" value="${b.id}" ${i === 0 ? 'checked' : ''} onchange="setSelBox('${b.id}')">
       <div class="bopt-info">
@@ -459,9 +615,29 @@ function disconnectFirebaseUI() {
 // ── scene glue ─────────────────────────────────────────────────
 
 function refreshScene() {
-  const result = packResult();
-  const box    = S.confBox || (result ? result.box : guessBestBox());
-  buildScene(S.order, box, result ? result.placements : null);
+  const items  = flattenOrder();
+  const result = packResult();          // null = nothing fits
+
+  if (!items.length) {
+    hideNoFitBanner();
+    buildScene(S.order, null, null);
+    document.getElementById('leg').innerHTML = '';
+    return;
+  }
+
+  if (!result) {
+    // Nothing fits — show banner in viewer, show modal if user just added something
+    showNoFitBanner(items);
+    // Still render a ghost of the largest box so the viewer isn't empty
+    const biggestBox = S.boxes.length
+      ? [...S.boxes].sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h))[0]
+      : null;
+    buildScene(S.order, biggestBox, null);
+  } else {
+    hideNoFitBanner();
+    const box = S.confBox || result.box;
+    buildScene(S.order, box, result.placements);
+  }
 
   document.getElementById('leg').innerHTML = S.order.map((p, i) =>
     `<div class="legit">
