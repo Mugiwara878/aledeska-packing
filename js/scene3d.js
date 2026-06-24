@@ -90,16 +90,9 @@ function getMeshDims(mesh) {
 function clampToBounds(mesh) {
   const dims = getMeshDims(mesh);
   const hw = dims.x / 2, hh = dims.y / 2, hd = dims.z / 2;
-  const sceneOff = scene.position;
-  const minX = -sceneOff.x + hw;
-  const maxX = boxBounds.l - sceneOff.x - hw;
-  const minY = -sceneOff.y + hh;
-  const maxY = boxBounds.h - sceneOff.y - hh;
-  const minZ = -sceneOff.z + hd;
-  const maxZ = boxBounds.w - sceneOff.z - hd;
-  mesh.position.x = Math.max(minX, Math.min(maxX, mesh.position.x));
-  mesh.position.y = Math.max(minY, Math.min(maxY, mesh.position.y));
-  mesh.position.z = Math.max(minZ, Math.min(maxZ, mesh.position.z));
+  mesh.position.x = Math.max(hw, Math.min(boxBounds.l - hw, mesh.position.x));
+  mesh.position.y = Math.max(hh, Math.min(boxBounds.h - hh, mesh.position.y));
+  mesh.position.z = Math.max(hd, Math.min(boxBounds.w - hd, mesh.position.z));
 }
 
 function getAABB(mesh) {
