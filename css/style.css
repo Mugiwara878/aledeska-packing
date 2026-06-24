@@ -560,3 +560,90 @@ hr.div {
   font-size: 11px;
   margin-bottom: 10px;
 }
+
+/* ── no-fit banner ────────────────────────────────────────────── */
+.nofit-banner {
+  background: #fcebeb;
+  color: #501313;
+  border: 1px solid #f5c0c0;
+  border-radius: 8px;
+  padding: 9px 13px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* ── modal ────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+  transition: background 0.2s ease;
+}
+
+.modal-overlay.modal-visible {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.modal-box {
+  background: #fff;
+  border-radius: 16px;
+  padding: 28px 24px 22px;
+  max-width: 380px;
+  width: 100%;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
+  transform: translateY(12px) scale(0.97);
+  opacity: 0;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  text-align: center;
+}
+
+.modal-overlay.modal-visible .modal-box {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+
+.modal-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+  line-height: 1;
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin-bottom: 8px;
+}
+
+.modal-msg {
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.modal-details {
+  font-size: 11px;
+  color: #888;
+  background: #f4f1ec;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  margin-bottom: 18px;
+  line-height: 1.7;
+}
+
+.modal-close {
+  margin-bottom: 0;
+  max-width: 180px;
+  margin-left: auto;
+  margin-right: auto;
+  display: block;
+}
