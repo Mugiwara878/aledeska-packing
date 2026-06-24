@@ -9,6 +9,10 @@ let raycaster, dragPlane, dragOffset;
 let isMovingProduct = false;
 let boxBounds       = { l: 0, w: 0, h: 0 };
 
+// For real-time collision: store last confirmed valid position & drag state
+let lastValidPos    = new THREE.Vector3();
+let isColliding     = false;
+
 function initScene() {
   const viewer = document.getElementById('viewer');
 
@@ -106,7 +110,7 @@ function getAABB(mesh) {
 }
 
 function aabbOverlap(a, b, margin) {
-  const m = margin || 0.1;
+  const m = margin !== undefined ? margin : 0.15;
   return a.maxX > b.minX + m && a.minX < b.maxX - m &&
          a.maxY > b.minY + m && a.minY < b.maxY - m &&
          a.maxZ > b.minZ + m && a.minZ < b.maxZ - m;
@@ -121,12 +125,26 @@ function hasCollision(mesh) {
   return false;
 }
 
+// Set mesh visual to collision state (red tint) or normal
+function setCollisionVisual(mesh, colliding) {
+  if (!mesh) return;
+  if (colliding) {
+    mesh.material.emissive.setHex(0xcc2200);
+    mesh.material.emissiveIntensity = 0.45;
+  } else {
+    // Restore selection highlight or normal
+    mesh.material.emissive.setHex(0xffffff);
+    mesh.material.emissiveIntensity = 0.22;
+  }
+}
+
 function selectMesh(mesh) {
   if (selectedMesh) {
     selectedMesh.material.emissive.setHex(0x000000);
     selectedMesh.material.emissiveIntensity = 0;
   }
   selectedMesh = mesh;
+  isColliding  = false;
   if (mesh) {
     mesh.material.emissive.setHex(0xffffff);
     mesh.material.emissiveIntensity = 0.22;
@@ -174,12 +192,60 @@ function rotateMesh90() {
     }
   }
 
+  lastValidPos.copy(selectedMesh.position);
   renderFrame();
+}
+
+// Slide the mesh toward a target position, stopping just before collision
+// Uses binary search to find the furthest safe position along the movement vector
+function slideTowards(mesh, targetPos) {
+  const startPos = lastValidPos.clone();
+  const clamped  = targetPos.clone();
+
+  // First clamp to box
+  const dims = getMeshDims(mesh);
+  const hw = dims.x / 2, hh = dims.y / 2, hd = dims.z / 2;
+  clamped.x = Math.max(hw, Math.min(boxBounds.l - hw, clamped.x));
+  clamped.y = Math.max(hh, Math.min(boxBounds.h - hh, clamped.y));
+  clamped.z = Math.max(hd, Math.min(boxBounds.w - hd, clamped.z));
+
+  // Check if target is already collision-free
+  mesh.position.copy(clamped);
+  if (!hasCollision(mesh)) {
+    lastValidPos.copy(clamped);
+    isColliding = false;
+    return false; // no collision
+  }
+
+  // Binary search: find the largest t in [0,1] where start + t*(clamped-start) is safe
+  let lo = 0, hi = 1;
+  const dir = new THREE.Vector3().subVectors(clamped, startPos);
+
+  // Only search if there's meaningful movement
+  if (dir.lengthSq() < 0.001) {
+    mesh.position.copy(startPos);
+    isColliding = true;
+    return true;
+  }
+
+  for (let i = 0; i < 8; i++) {
+    const mid = (lo + hi) / 2;
+    mesh.position.copy(startPos).addScaledVector(dir, mid);
+    if (hasCollision(mesh)) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+
+  mesh.position.copy(startPos).addScaledVector(dir, lo);
+  if (lo > 0.001) lastValidPos.copy(mesh.position);
+  isColliding = true;
+  return true;
 }
 
 function bindControls() {
   const el = renderer.domElement;
-  let lastValidPos = new THREE.Vector3();
 
   el.addEventListener('mousedown', e => {
     const hit = pickProduct(e.clientX, e.clientY);
@@ -187,6 +253,7 @@ function bindControls() {
       selectMesh(hit.object);
       isMovingProduct = true;
       lastValidPos.copy(hit.object.position);
+      isColliding = false;
       const normal = camera.position.clone().normalize();
       dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
       dragOffset.copy(hit.object.position).sub(hit.point);
@@ -200,11 +267,13 @@ function bindControls() {
 
   window.addEventListener('mouseup', () => {
     if (isMovingProduct && selectedMesh) {
-      clampToBounds(selectedMesh);
-      if (hasCollision(selectedMesh)) {
+      // On release, ensure we're at the valid position
+      if (isColliding) {
         selectedMesh.position.copy(lastValidPos);
-        clampToBounds(selectedMesh);
       }
+      isColliding = false;
+      setCollisionVisual(selectedMesh, false);
+
       const idx = productMeshes.indexOf(selectedMesh);
       if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
       renderFrame();
@@ -218,10 +287,11 @@ function bindControls() {
       raycaster.setFromCamera(getNDC(e.clientX, e.clientY), camera);
       const target = new THREE.Vector3();
       if (raycaster.ray.intersectPlane(dragPlane, target)) {
-        const newPos = target.add(dragOffset);
-        selectedMesh.position.copy(newPos);
-        clampToBounds(selectedMesh);
-        if (!hasCollision(selectedMesh)) lastValidPos.copy(selectedMesh.position);
+        const desiredPos = target.add(dragOffset);
+        const collided   = slideTowards(selectedMesh, desiredPos);
+
+        setCollisionVisual(selectedMesh, collided);
+
         const idx = productMeshes.indexOf(selectedMesh);
         if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
         renderFrame();
@@ -246,6 +316,7 @@ function bindControls() {
         selectMesh(hit.object);
         isMovingProduct = true;
         lastValidPos.copy(hit.object.position);
+        isColliding = false;
         const normal = camera.position.clone().normalize();
         dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
         dragOffset.copy(hit.object.position).sub(hit.point);
@@ -266,9 +337,11 @@ function bindControls() {
         raycaster.setFromCamera(getNDC(t.clientX, t.clientY), camera);
         const target = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(dragPlane, target)) {
-          selectedMesh.position.copy(target.add(dragOffset));
-          clampToBounds(selectedMesh);
-          if (!hasCollision(selectedMesh)) lastValidPos.copy(selectedMesh.position);
+          const desiredPos = target.add(dragOffset);
+          const collided   = slideTowards(selectedMesh, desiredPos);
+
+          setCollisionVisual(selectedMesh, collided);
+
           const idx = productMeshes.indexOf(selectedMesh);
           if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
           renderFrame();
@@ -287,13 +360,14 @@ function bindControls() {
 
   el.addEventListener('touchend', () => {
     if (isMovingProduct && selectedMesh) {
-      if (hasCollision(selectedMesh)) {
+      if (isColliding) {
         selectedMesh.position.copy(lastValidPos);
-        clampToBounds(selectedMesh);
-        const idx = productMeshes.indexOf(selectedMesh);
-        if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
-        renderFrame();
       }
+      isColliding = false;
+      setCollisionVisual(selectedMesh, false);
+      const idx = productMeshes.indexOf(selectedMesh);
+      if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
+      renderFrame();
     }
     isDragging = false;
     isMovingProduct = false;
@@ -333,6 +407,7 @@ function buildScene(order, box, placements) {
   productMeshes = [];
   productEdges  = [];
   selectedMesh  = null;
+  isColliding   = false;
   updateRotateBtn();
 
   if (!box && !order.length) { renderFrame(); return; }
