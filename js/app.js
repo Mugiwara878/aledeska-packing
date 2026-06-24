@@ -1,499 +1,318 @@
-const LS_KEY = 'aledeska_pack_v3';
+let renderer, scene, camera;
+let isDragging   = false;
+let prevMouse    = { x: 0, y: 0 };
+let spherical    = { theta: Math.PI / 4, phi: Math.PI / 3, radius: 120 };
+let selectedMesh = null;
+let productMeshes = [];
+let raycaster, mouse;
+let dragPlane, dragOffset;
+let isMovingProduct = false;
 
-const S = {
-  products: [],
-  boxes:    [],
-  order:    [],
-  selBox:   null,
-  confBox:  null,
-};
+function initScene() {
+  const viewer = document.getElementById('viewer');
 
-// ── persistence ────────────────────────────────────────────────
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+  viewer.appendChild(renderer.domElement);
+  resizeRenderer();
 
-function saveLocal() {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify({ products: S.products, boxes: S.boxes }));
-  } catch (e) { /* storage full */ }
+  scene  = new THREE.Scene();
+  scene.background = new THREE.Color(0xf0ede7);
+
+  camera = new THREE.PerspectiveCamera(45, viewer.clientWidth / (viewer.clientHeight || 400), 0.1, 2000);
+  updateCamera();
+
+  raycaster = new THREE.Raycaster();
+  mouse     = new THREE.Vector2();
+  dragPlane = new THREE.Plane();
+  dragOffset = new THREE.Vector3();
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(80, 120, 80);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(1024, 1024);
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
+  fill.position.set(-60, 40, -60);
+  scene.add(fill);
+
+  bindControls();
+  window.addEventListener('resize', () => { resizeRenderer(); renderFrame(); });
+  renderFrame();
 }
 
-function loadLocal() {
-  try {
-    const d = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-    if (d.products) S.products = d.products;
-    if (d.boxes)    S.boxes    = d.boxes;
-  } catch (e) { /* corrupt */ }
+function resizeRenderer() {
+  const viewer = document.getElementById('viewer');
+  const w = viewer.clientWidth;
+  const h = viewer.clientHeight || 400;
+  renderer.setSize(w, h);
+  if (camera) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
 }
 
-async function persist() {
-  if (isConnected()) {
-    const ok = await saveToFirebase(S.products, S.boxes);
-    if (!ok) saveLocal();
-  } else {
-    saveLocal();
-  }
-}
-
-// ── tabs ───────────────────────────────────────────────────────
-
-function switchTab(name) {
-  document.querySelectorAll('.tc').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  document.getElementById('tab-btn-' + name).classList.add('active');
-}
-
-// ── product list ───────────────────────────────────────────────
-
-function filterProds(q) {
-  renderPlist(q.toLowerCase());
-}
-
-function renderPlist(q) {
-  const el = document.getElementById('plist');
-  const filtered = S.products.filter(p =>
-    p.name.toLowerCase().includes(q) || (p.sku && p.sku.toLowerCase().includes(q))
+function updateCamera() {
+  const { radius, phi, theta } = spherical;
+  camera.position.set(
+    radius * Math.sin(phi) * Math.sin(theta),
+    radius * Math.cos(phi),
+    radius * Math.sin(phi) * Math.cos(theta)
   );
+  camera.lookAt(0, 0, 0);
+}
 
-  if (!filtered.length) {
-    el.innerHTML = '<div class="empty">Brak wynikow</div>';
-    return;
+function renderFrame() { renderer.render(scene, camera); }
+
+function getNDC(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((clientX - rect.left) / rect.width)  *  2 - 1,
+    ((clientY - rect.top)  / rect.height) * -2 + 1
+  );
+}
+
+function pickProduct(clientX, clientY) {
+  const ndc = getNDC(clientX, clientY);
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(productMeshes, false);
+  return hits.length > 0 ? hits[0] : null;
+}
+
+function selectMesh(mesh) {
+  if (selectedMesh) {
+    selectedMesh.material.emissive.setHex(0x000000);
+    selectedMesh.material.emissiveIntensity = 0;
   }
-
-  el.innerHTML = filtered.slice(0, 60).map(p => {
-    const hasDims = p.l && p.w && p.h;
-    const badge   = hasDims ? '' : '<span class="nodims">brak wymiarow</span>';
-    return `<div class="pitem" onclick="addToOrder('${p.id}')">
-      <div class="pitem-info">
-        <div class="pitem-name">${p.name}${badge}</div>
-        <div class="pdims">${p.sku} &middot; ${p.l || '?'}&times;${p.w || '?'}&times;${p.h || '?'} cm &middot; ${p.waga} kg</div>
-      </div>
-      <span class="pitem-add">+</span>
-    </div>`;
-  }).join('');
-}
-
-// ── order ──────────────────────────────────────────────────────
-
-function addToOrder(id) {
-  const p  = S.products.find(x => x.id === id);
-  if (!p) return;
-  const ex = S.order.find(x => x.id === id);
-  if (ex) ex.qty++;
-  else    S.order.push({ ...p, qty: 1 });
-
-  renderOrder();
-  refreshScene();
-  document.getElementById('bproposal').style.display  = 'none';
-  document.getElementById('bconfirmed').style.display = 'none';
-}
-
-function chgQty(id, delta) {
-  const item = S.order.find(x => x.id === id);
-  if (!item) return;
-  item.qty = Math.max(0, item.qty + delta);
-  if (!item.qty) S.order = S.order.filter(x => x.id !== id);
-  renderOrder();
-  refreshScene();
-}
-
-function rmOrder(id) {
-  S.order = S.order.filter(x => x.id !== id);
-  renderOrder();
-  refreshScene();
-}
-
-function renderOrder() {
-  const el = document.getElementById('oitems');
-
-  if (!S.order.length) {
-    el.innerHTML = '<div class="empty">Dodaj produkty z listy powyzej</div>';
-    document.getElementById('twgt').textContent  = '0 kg';
-    document.getElementById('titms').textContent = '0 szt.';
-    return;
+  selectedMesh = mesh;
+  if (mesh) {
+    mesh.material.emissive.setHex(0xffffff);
+    mesh.material.emissiveIntensity = 0.25;
   }
-
-  el.innerHTML = S.order.map(p => `
-    <div class="oitem">
-      <div class="oitem-name">${p.name}</div>
-      <div class="qty-ctrl">
-        <button class="qbtn" onclick="chgQty('${p.id}', -1)">-</button>
-        <span class="qty-val">${p.qty}</span>
-        <button class="qbtn" onclick="chgQty('${p.id}', 1)">+</button>
-      </div>
-      <button class="rmv" onclick="rmOrder('${p.id}')">&times;</button>
-    </div>`).join('');
-
-  const totalW = S.order.reduce((a, p) => a + p.waga * p.qty, 0);
-  const totalI = S.order.reduce((a, p) => a + p.qty, 0);
-  document.getElementById('twgt').textContent  = totalW.toFixed(2) + ' kg';
-  document.getElementById('titms').textContent = totalI + ' szt.';
+  renderFrame();
 }
 
-// ── bin packing ────────────────────────────────────────────────
+function bindControls() {
+  const el = renderer.domElement;
 
-function flattenOrder() {
-  const items = [];
-  S.order.forEach(p => {
-    for (let i = 0; i < p.qty; i++) {
-      items.push({ l: p.l || 10, w: p.w || 10, h: p.h || 3, waga: p.waga, name: p.name, sku: p.sku });
+  el.addEventListener('mousedown', e => {
+    const hit = pickProduct(e.clientX, e.clientY);
+    if (hit) {
+      selectMesh(hit.object);
+      isMovingProduct = true;
+      // drag plane perpendicular to camera through hit point
+      const normal = camera.position.clone().normalize();
+      dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
+      // offset = mesh center - hit point
+      dragOffset.copy(hit.object.position).sub(hit.point);
+    } else {
+      selectMesh(null);
+      isMovingProduct = false;
+      isDragging = true;
     }
+    prevMouse = { x: e.clientX, y: e.clientY };
   });
-  return items;
-}
 
-function packIntoBox(items, boxL, boxW) {
-  // greedy shelf packing: place items row by row on each layer
-  // returns array of {x, y, z, l, w, h} placements or null if doesnt fit
-  const sorted = [...items].sort((a, b) => (b.l * b.w) - (a.l * a.w));
-  const placements = [];
-  let curZ = 0;
+  window.addEventListener('mouseup', () => {
+    isDragging      = false;
+    isMovingProduct = false;
+  });
 
-  while (sorted.length > 0) {
-    // start new layer
-    const layerH = sorted[0].h;
-    let curX = 0, curY = 0, rowH = 0;
-
-    const remaining = [];
-    for (const item of sorted) {
-      if (item.l <= boxL && item.w <= boxW) {
-        // try to place in current row
-        if (curX + item.l <= boxL) {
-          placements.push({ x: curX, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
-          if (item.w > rowH) rowH = item.w;
-          curX += item.l;
-        } else if (curY + rowH + item.w <= boxW) {
-          // next row
-          curY += rowH;
-          curX  = item.l;
-          rowH  = item.w;
-          placements.push({ x: 0, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
-        } else {
-          remaining.push(item);
+  window.addEventListener('mousemove', e => {
+    if (isMovingProduct && selectedMesh) {
+      const ndc = getNDC(e.clientX, e.clientY);
+      raycaster.setFromCamera(ndc, camera);
+      const target = new THREE.Vector3();
+      raycaster.ray.intersectPlane(dragPlane, target);
+      if (target) {
+        selectedMesh.position.copy(target.add(dragOffset));
+        // sync edge helper
+        const idx = productMeshes.indexOf(selectedMesh);
+        if (idx >= 0 && productEdges[idx]) {
+          productEdges[idx].position.copy(selectedMesh.position);
         }
-      } else {
-        remaining.push(item);
+        renderFrame();
       }
+    } else if (isDragging) {
+      rotate(e.clientX - prevMouse.x, e.clientY - prevMouse.y);
+      prevMouse = { x: e.clientX, y: e.clientY };
     }
-
-    if (remaining.length === sorted.length) return null; // nothing placed, infinite loop guard
-    sorted.length = 0;
-    sorted.push(...remaining);
-    curZ += layerH;
-  }
-
-  return { placements, totalH: curZ };
-}
-
-function packResult() {
-  const items = flattenOrder();
-  if (!items.length) return null;
-  const totalWgt = items.reduce((a, i) => a + i.waga, 0);
-
-  // find smallest fitting box
-  const candidates = S.boxes
-    .filter(b => b.maxW >= totalWgt + b.ow)
-    .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h);
-
-  for (const box of candidates) {
-    const result = packIntoBox(items, box.l, box.w);
-    if (result && result.totalH <= box.h) {
-      return { box, placements: result.placements, totalH: result.totalH, totalWgt };
-    }
-    // try rotated items
-    const rotated = items.map(i => ({ ...i, l: i.w, w: i.l }));
-    const result2 = packIntoBox(rotated, box.l, box.w);
-    if (result2 && result2.totalH <= box.h) {
-      return { box, placements: result2.placements, totalH: result2.totalH, totalWgt };
-    }
-  }
-  return null;
-}
-
-function getBB() {
-  const items = flattenOrder();
-  if (!items.length) return null;
-  const maxL  = Math.max(...items.map(i => i.l));
-  const maxW  = Math.max(...items.map(i => i.w));
-  const totH  = items.reduce((a, i) => a + i.h, 0);
-  const totWgt = items.reduce((a, i) => a + i.waga, 0);
-  return { l: maxL, w: maxW, h: totH, wgt: totWgt };
-}
-
-function guessBestBox() {
-  const result = packResult();
-  return result ? result.box : (S.boxes[S.boxes.length - 1] || null);
-}
-
-// ── box proposal ───────────────────────────────────────────────
-
-function proposeBox() {
-  if (!S.order.length) return;
-  const optsEl = document.getElementById('bopts');
-  const wrap   = document.getElementById('bproposal');
-  const items  = flattenOrder();
-  const totalWgt = items.reduce((a, i) => a + i.waga, 0);
-
-  const fitting = [];
-  S.boxes
-    .filter(b => b.maxW >= totalWgt + b.ow)
-    .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h)
-    .forEach(b => {
-      const r = packIntoBox(items, b.l, b.w);
-      if (r && r.totalH <= b.h) {
-        fitting.push({ box: b, placements: r.placements, totalH: r.totalH });
-        return;
-      }
-      const rot = items.map(i => ({ ...i, l: i.w, w: i.l }));
-      const r2  = packIntoBox(rot, b.l, b.w);
-      if (r2 && r2.totalH <= b.h) {
-        fitting.push({ box: b, placements: r2.placements, totalH: r2.totalH });
-      }
-    });
-
-  if (!fitting.length) {
-    optsEl.innerHTML = '<div class="alert aw">Zaden karton nie pasuje. Sprawdz wymiary lub dodaj wiekszy karton.</div>';
-    wrap.style.display = 'block';
-    return;
-  }
-
-  optsEl.innerHTML = fitting.slice(0, 5).map(({ box: b, totalH }, i) => {
-    const vol  = b.l * b.w * b.h;
-    const itemVol = items.reduce((a, it) => a + it.l * it.w * it.h, 0);
-    const fill = Math.round(itemVol / vol * 100);
-    const best = i === 0 ? ' best' : '';
-    const tag  = i === 0 ? '<span class="best-tag">najlepszy</span>' : '';
-    return `<label class="bopt${best}">
-      <input type="radio" name="bop" value="${b.id}" ${i === 0 ? 'checked' : ''} onchange="setSelBox('${b.id}')">
-      <div class="bopt-info">
-        <div class="bopt-name">${b.name} ${tag}</div>
-        <div class="bopt-dims">${b.l}&times;${b.w}&times;${b.h} cm &middot; max ${b.maxW} kg &middot; ~${fill}% wypelnienia &middot; uzyto ${totalH.toFixed(1)} cm wys.</div>
-      </div>
-    </label>`;
-  }).join('');
-
-  S.selBox = fitting[0].box.id;
-  wrap.style.display = 'block';
-  document.getElementById('bconfirmed').style.display = 'none';
-}
-
-function setSelBox(id) { S.selBox = id; }
-
-function confirmBox() {
-  const b = S.boxes.find(x => x.id === S.selBox);
-  if (!b) return;
-  S.confBox = b;
-
-  const bb = getBB();
-  const tw = (bb.wgt + b.ow).toFixed(2);
-
-  document.getElementById('bconfirmed').innerHTML =
-    `<div class="alert aok">${b.name} zatwierdzony &mdash; ${b.l}&times;${b.w}&times;${b.h} cm &mdash; <strong>${tw} kg</strong></div>`;
-  document.getElementById('bconfirmed').style.display = 'block';
-  document.getElementById('bproposal').style.display  = 'none';
-
-  renderSummary(b, bb, tw);
-  refreshScene();
-}
-
-function renderSummary(b, bb, tw) {
-  const items = S.order.map(p => `${p.qty}&times; ${p.name}`).join('<br>');
-  document.getElementById('summary').innerHTML = `
-    <div class="sgrid">
-      <div class="scard"><div class="slbl">Karton</div><div class="sval sval--sm">${b.name}</div></div>
-      <div class="scard"><div class="slbl">Waga wysylki</div><div class="sval">${tw} kg</div></div>
-      <div class="scard"><div class="slbl">Wymiary (cm)</div><div class="sval sval--sm">${b.l}&times;${b.w}&times;${b.h}</div></div>
-      <div class="scard"><div class="slbl">Sztuk</div><div class="sval">${S.order.reduce((a, p) => a + p.qty, 0)}</div></div>
-    </div>
-    <div class="summary-items">${items}</div>`;
-}
-
-// ── boxes tab ──────────────────────────────────────────────────
-
-async function addBox() {
-  const name = document.getElementById('bn').value.trim();
-  const l    = parseFloat(document.getElementById('bl').value);
-  const w    = parseFloat(document.getElementById('bw').value);
-  const h    = parseFloat(document.getElementById('bh').value);
-  const maxW = parseFloat(document.getElementById('bmw').value) || 20;
-  const ow   = parseFloat(document.getElementById('bow').value) || 0.5;
-
-  if (!name || !l || !w || !h) { alert('Uzupelnij nazwe i wymiary!'); return; }
-
-  S.boxes.push({ id: 'c' + Date.now(), name, l, w, h, maxW, ow });
-  await persist();
-  renderBoxes();
-  ['bn', 'bl', 'bw', 'bh', 'bmw', 'bow'].forEach(id => {
-    document.getElementById(id).value = '';
   });
-}
 
-function removeBox(id) {
-  if (!confirm('Usunac karton?')) return;
-  S.boxes = S.boxes.filter(x => x.id !== id);
-  persist();
-  renderBoxes();
-}
+  el.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoom(e.deltaY * 0.2);
+  }, { passive: false });
 
-function renderBoxes() {
-  const el = document.getElementById('blist');
-  if (!S.boxes.length) { el.innerHTML = '<div class="empty">Brak kartonow</div>'; return; }
-
-  el.innerHTML = '<div class="blist-wrap">' +
-    S.boxes.map(b => `
-      <div class="blistitem">
-        <span class="bbadge">${b.name}</span>
-        <span class="blistitem-dims">${b.l}&times;${b.w}&times;${b.h} cm &middot; max ${b.maxW} kg</span>
-        <button class="rmv" onclick="removeBox('${b.id}')">&times;</button>
-      </div>`).join('') +
-    '</div>';
-}
-
-// ── import / export ────────────────────────────────────────────
-
-function importCSV(inp) {
-  const file = inp.files[0];
-  if (!file) return;
-  document.getElementById('impstatus').innerHTML = '<div class="alert aw">Wczytywanie...</div>';
-
-  const reader = new FileReader();
-  reader.onload = async function(e) {
-    const lines = e.target.result.split('\n').map(l => l.trim()).filter(l => l);
-    let added = 0, updated = 0, skipped = 0;
-
-    lines.forEach(line => {
-      const parts = line.split(';').map(x => x.trim().replace(/^"+|"+$/g, ''));
-      if (parts.length < 4) { skipped++; return; }
-      const [id, sku, name, wS, dS, sS, hS] = parts;
-      if (!sku || !name) { skipped++; return; }
-
-      const sf = s => parseFloat((s || '0').replace(',', '.')) || 0;
-      const prod = {
-        id:   id || 'i' + Date.now(),
-        sku,
-        name: name.replace(/<[^>]+>/g, '').substring(0, 70),
-        waga: sf(wS), l: sf(dS), w: sf(sS), h: sf(hS),
-      };
-
-      const ex = S.products.find(x => x.sku === sku || x.id === id);
-      if (ex) { Object.assign(ex, prod); updated++; }
-      else    { S.products.push(prod);   added++; }
-    });
-
-    await persist();
-    renderPlist('');
-    renderNoDims();
-    document.getElementById('impstatus').innerHTML =
-      `<div class="alert aok">${added} nowych, ${updated} zaktualizowanych${skipped ? ', ' + skipped + ' pominieto' : ''}</div>`;
-    inp.value = '';
-  };
-  reader.readAsText(file, 'utf-8');
-}
-
-function renderNoDims() {
-  const el = document.getElementById('nodims-list');
-  const nd = S.products.filter(p => !p.l || !p.w || !p.h);
-
-  if (!nd.length) {
-    el.innerHTML = '<div class="empty">Wszystkie produkty maja wymiary</div>';
-    return;
-  }
-
-  el.innerHTML = `<div class="nodims-count">${nd.length} produktow bez wymiarow:</div>` +
-    nd.map(p => `<div class="nodims-row">${p.sku} &mdash; ${p.name.substring(0, 45)}</div>`).join('');
-}
-
-function exportData() {
-  const json = JSON.stringify({ products: S.products, boxes: S.boxes }, null, 2);
-  const a = document.createElement('a');
-  a.href     = 'data:application/json;charset=utf-8,' + encodeURIComponent(json);
-  a.download = 'aledeska_packing_backup.json';
-  a.click();
-}
-
-function importData(inp) {
-  const file = inp.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async function(e) {
-    try {
-      const d = JSON.parse(e.target.result);
-      if (d.products) S.products = d.products;
-      if (d.boxes)    S.boxes    = d.boxes;
-      await persist();
-      renderPlist('');
-      renderBoxes();
-      renderNoDims();
-      alert('Dane zaimportowane.');
-    } catch {
-      alert('Blad pliku JSON.');
+  // touch
+  let lastDist = 0;
+  el.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const hit = pickProduct(t.clientX, t.clientY);
+      if (hit) {
+        selectMesh(hit.object);
+        isMovingProduct = true;
+        const normal = camera.position.clone().normalize();
+        dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
+        dragOffset.copy(hit.object.position).sub(hit.point);
+      } else {
+        selectMesh(null);
+        isMovingProduct = false;
+        isDragging = true;
+      }
+      prevMouse = { x: t.clientX, y: t.clientY };
     }
-    inp.value = '';
-  };
-  reader.readAsText(file, 'utf-8');
+    if (e.touches.length === 2) lastDist = touchDist(e);
+  }, { passive: true });
+
+  el.addEventListener('touchmove', e => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      if (isMovingProduct && selectedMesh) {
+        const ndc = getNDC(t.clientX, t.clientY);
+        raycaster.setFromCamera(ndc, camera);
+        const target = new THREE.Vector3();
+        raycaster.ray.intersectPlane(dragPlane, target);
+        if (target) {
+          selectedMesh.position.copy(target.add(dragOffset));
+          const idx = productMeshes.indexOf(selectedMesh);
+          if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
+          renderFrame();
+        }
+      } else if (isDragging) {
+        rotate(t.clientX - prevMouse.x, t.clientY - prevMouse.y);
+        prevMouse = { x: t.clientX, y: t.clientY };
+      }
+    }
+    if (e.touches.length === 2) {
+      const d = touchDist(e);
+      zoom(-(d - lastDist) * 0.5);
+      lastDist = d;
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchend', () => { isDragging = false; isMovingProduct = false; }, { passive: true });
 }
 
-// ── Firebase UI ────────────────────────────────────────────────
+function rotate(dx, dy) {
+  spherical.theta -= dx * 0.008;
+  spherical.phi    = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, spherical.phi + dy * 0.008));
+  updateCamera();
+  renderFrame();
+}
 
-async function connectFirebaseUI() {
-  const apiKey    = document.getElementById('fb-apikey').value.trim();
-  const projectId = document.getElementById('fb-projectid').value.trim();
-  const appId     = document.getElementById('fb-appid').value.trim();
-  const statusEl  = document.getElementById('fb-status');
+function zoom(delta) {
+  spherical.radius = Math.max(30, Math.min(400, spherical.radius + delta));
+  updateCamera();
+  renderFrame();
+}
 
-  try {
-    await connectFirebase(apiKey, projectId, appId,
-      products => { if (products) { S.products = products; renderPlist(''); renderNoDims(); } else { S.products = [...DEF_PRODS]; persist(); } },
-      boxes    => { if (boxes)    { S.boxes    = boxes;    renderBoxes(); }                  else { S.boxes    = [...DEF_BOXES]; persist(); } }
-    );
-    statusEl.innerHTML = '<div class="alert aok">Polaczono. Dane synchronizuja sie miedzy urzadzeniami.</div>';
-  } catch (e) {
-    statusEl.innerHTML = `<div class="alert aerr">Blad polaczenia: ${e.message}</div>`;
+function touchDist(e) {
+  return Math.hypot(
+    e.touches[0].clientX - e.touches[1].clientX,
+    e.touches[0].clientY - e.touches[1].clientY
+  );
+}
+
+function makeEdges(w, h, d, color, opacity) {
+  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d));
+  const mat = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity: opacity || 1 });
+  return new THREE.LineSegments(geo, mat);
+}
+
+let productEdges = [];
+
+function buildScene(order, box, placements) {
+  // clear old meshes
+  const toRemove = [];
+  scene.traverse(o => { if (o.isMesh || o.isLineSegments) toRemove.push(o); });
+  toRemove.forEach(o => scene.remove(o));
+  productMeshes = [];
+  productEdges  = [];
+  selectedMesh  = null;
+
+  if (!box && !order.length) { renderFrame(); return; }
+
+  const bL = box ? box.l : 60;
+  const bW = box ? box.w : 50;
+  const bH = box ? box.h : 40;
+
+  scene.position.set(-bL / 2, -bH / 2, -bW / 2);
+
+  // carton shell
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0xd4c9b0, transparent: true, opacity: 0.1, side: THREE.BackSide,
+  });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(bL, bH, bW), wallMat);
+  shell.position.set(bL / 2, bH / 2, bW / 2);
+  scene.add(shell);
+
+  const edgesBox = makeEdges(bL, bH, bW, 0x8a7560, 1);
+  edgesBox.position.copy(shell.position);
+  scene.add(edgesBox);
+
+  // floor
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0xc8bc9e, transparent: true, opacity: 0.25, side: THREE.DoubleSide,
+  });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(bL, bW), floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(bL / 2, 0, bW / 2);
+  scene.add(floor);
+
+  // products — use placements if available, else simple stack
+  if (placements && placements.length) {
+    let idx = 0;
+    order.forEach((item, pi) => {
+      const color = PROD_COLORS_HEX[pi % PROD_COLORS_HEX.length];
+      for (let i = 0; i < item.qty; i++) {
+        const pl = placements[idx++];
+        if (!pl) return;
+        const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05 });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl.l, pl.h, pl.w), mat);
+        mesh.position.set(pl.x + pl.l / 2, pl.z + pl.h / 2, pl.y + pl.w / 2);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.userData.productIdx = pi;
+        scene.add(mesh);
+        productMeshes.push(mesh);
+
+        const pe = makeEdges(pl.l, pl.h, pl.w, 0x000000, 0.1);
+        pe.position.copy(mesh.position);
+        scene.add(pe);
+        productEdges.push(pe);
+      }
+    });
+  } else {
+    // fallback: simple stack
+    let curY = 0;
+    order.forEach((item, pi) => {
+      const color = PROD_COLORS_HEX[pi % PROD_COLORS_HEX.length];
+      const pl = Math.min(item.l || 10, bL);
+      const pw = Math.min(item.w || 10, bW);
+      const ph = item.h || 3;
+      for (let i = 0; i < item.qty; i++) {
+        if (curY + ph > bH) break;
+        const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05 });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl, ph, pw), mat);
+        mesh.position.set(pl / 2, curY + ph / 2, pw / 2);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.userData.productIdx = pi;
+        scene.add(mesh);
+        productMeshes.push(mesh);
+        const pe = makeEdges(pl, ph, pw, 0x000000, 0.1);
+        pe.position.copy(mesh.position);
+        scene.add(pe);
+        productEdges.push(pe);
+        curY += ph;
+      }
+    });
   }
+
+  // fit camera
+  const diag = Math.sqrt(bL * bL + bH * bH + bW * bW);
+  spherical.radius = diag * 1.1;
+  updateCamera();
+  renderFrame();
 }
-
-function disconnectFirebaseUI() {
-  disconnectFirebase();
-  document.getElementById('fb-status').innerHTML = '<div class="alert aw">Rozlaczono. Dane zapisywane lokalnie.</div>';
-}
-
-// ── scene glue ─────────────────────────────────────────────────
-
-function refreshScene() {
-  const result = packResult();
-  const box    = S.confBox || (result ? result.box : guessBestBox());
-  buildScene(S.order, box, result ? result.placements : null);
-
-  document.getElementById('leg').innerHTML = S.order.map((p, i) =>
-    `<div class="legit">
-      <div class="legdot" style="background:${PROD_COLORS_CSS[i % PROD_COLORS_CSS.length]}"></div>
-      ${p.name.substring(0, 28)}
-    </div>`
-  ).join('');
-}
-
-// ── init ───────────────────────────────────────────────────────
-
-async function init() {
-  loadLocal();
-  if (!S.products.length) S.products = [...DEF_PRODS];
-  if (!S.boxes.length)    S.boxes    = [...DEF_BOXES];
-
-  renderPlist('');
-  renderBoxes();
-  renderNoDims();
-  initScene();
-  refreshScene();
-
-  const onProducts = products => { if (products) { S.products = products; renderPlist(''); renderNoDims(); } };
-  const onBoxes    = boxes    => { if (boxes)    { S.boxes    = boxes;    renderBoxes(); } };
-
-  const cfg = getSavedConfig() || FB_DEFAULT_CONFIG;
-  document.getElementById('fb-apikey').value    = cfg.apiKey    || '';
-  document.getElementById('fb-projectid').value = cfg.projectId || '';
-  document.getElementById('fb-appid').value     = cfg.appId     || '';
-  try {
-    await connectFirebase(cfg.apiKey, cfg.projectId, cfg.appId, onProducts, onBoxes);
-  } catch { /* offline fallback */ }
-}
-
-document.addEventListener('DOMContentLoaded', init);
