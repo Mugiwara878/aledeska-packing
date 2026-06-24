@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Asystent Pakowania &mdash; aledeska.pl</title>
+  <link rel="icon" type="image/x-icon" href="icon.ico">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-brand">
+    <div class="header-icon">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+        <line x1="12" y1="22.08" x2="12" y2="12"/>
+      </svg>
+    </div>
+    <div>
+      <div class="header-title">Asystent pakowania</div>
+      <div class="header-sub">aledeska.pl</div>
+    </div>
+  </div>
+  <div id="sync-status">Lokalnie</div>
+</header>
+
+<div class="layout">
+
+  <!-- left column -->
+  <div class="panel" style="overflow-y: auto;">
+    <div class="tabs">
+      <button class="tab active" id="tab-btn-order"    onclick="switchTab('order')">Zamowienie</button>
+      <button class="tab"        id="tab-btn-boxes"    onclick="switchTab('boxes')">Kartony</button>
+      <button class="tab"        id="tab-btn-import"   onclick="switchTab('import')">Import</button>
+      <button class="tab"        id="tab-btn-settings" onclick="switchTab('settings')">Firebase</button>
+    </div>
+
+    <!-- tab: order -->
+    <div id="tab-order" class="tc active">
+      <div class="ptitle">Szukaj produktu</div>
+      <input class="srch" type="text" placeholder="Nazwa lub SKU..." oninput="filterProds(this.value)">
+      <div class="plist" id="plist"></div>
+
+      <div class="ptitle" style="margin-top: 11px">Zawartosc paczki</div>
+      <div class="oitems" id="oitems">
+        <div class="empty">Dodaj produkty z listy powyzej</div>
+      </div>
+
+      <div class="sgrid">
+        <div class="scard"><div class="slbl">Waga produktow</div><div class="sval" id="twgt">0 kg</div></div>
+        <div class="scard"><div class="slbl">Ilosc sztuk</div><div class="sval" id="titms">0 szt.</div></div>
+      </div>
+
+      <button class="btn btn--primary" onclick="proposeBox()">Zaproponuj karton</button>
+
+      <div id="bproposal" style="display: none;">
+        <div class="ptitle">Wybierz karton</div>
+        <div id="bopts"></div>
+        <button class="btn" onclick="confirmBox()">Zatwierdz wybrany</button>
+      </div>
+
+      <div id="bconfirmed" style="display: none;"></div>
+    </div>
+
+    <!-- tab: boxes -->
+    <div id="tab-boxes" class="tc">
+      <div class="ptitle">Moje kartony</div>
+      <div id="blist"></div>
+
+      <hr class="div">
+      <div class="ptitle">Dodaj karton</div>
+      <div class="bform">
+        <div class="fg"><label>Nazwa</label><input type="text" id="bn" placeholder="np. Karton G"></div>
+        <div class="fr3">
+          <div class="fg"><label>Dl. cm</label><input type="number" id="bl" placeholder="60"></div>
+          <div class="fg"><label>Szer. cm</label><input type="number" id="bw" placeholder="40"></div>
+          <div class="fg"><label>Wys. cm</label><input type="number" id="bh" placeholder="30"></div>
+        </div>
+        <div class="fr2">
+          <div class="fg"><label>Max waga kg</label><input type="number" id="bmw" placeholder="25" step="0.1"></div>
+          <div class="fg"><label>Waga kartonu kg</label><input type="number" id="bow" placeholder="0.5" step="0.1"></div>
+        </div>
+        <button class="btn" onclick="addBox()">Dodaj karton</button>
+      </div>
+    </div>
+
+    <!-- tab: import -->
+    <div id="tab-import" class="tc">
+      <div class="ptitle">Import CSV &mdash; BaseLinker</div>
+      <div class="imp" onclick="document.getElementById('csvinput').click()">
+        <svg class="imp-icon" width="28" height="28" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        Wgraj plik CSV z BaseLinker
+        <span class="imp-hint">Format: id;sku;nazwa;waga;dlugosc;szerokosc;wysokosc</span>
+      </div>
+      <input type="file" id="csvinput" accept=".csv" onchange="importCSV(this)">
+      <div id="impstatus"></div>
+
+      <hr class="div">
+      <div class="ptitle">Produkty bez wymiarow</div>
+      <div id="nodims-list" style="max-height: 180px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- tab: firebase -->
+    <div id="tab-settings" class="tc">
+      <div class="ptitle">Synchronizacja Firebase</div>
+      <div class="alert aw firebase-info">
+        <strong>Jak skonfigurowac:</strong><br>
+        1. console.firebase.google.com &rarr; utworz projekt<br>
+        2. Firestore Database &rarr; tryb testowy &rarr; europe-west<br>
+        3. Ustawienia &rarr; Twoje aplikacje &rarr; Web &rarr; skopiuj config<br>
+        4. Wklej dane ponizej i kliknij Polacz
+      </div>
+      <div class="bform">
+        <div class="fg"><label>API Key</label><input type="text" id="fb-apikey" placeholder="AIzaSy..."></div>
+        <div class="fg"><label>Project ID</label><input type="text" id="fb-projectid" placeholder="moj-projekt-12345"></div>
+        <div class="fg"><label>App ID</label><input type="text" id="fb-appid" placeholder="1:123456:web:abc123"></div>
+        <button class="btn btn--primary" onclick="connectFirebaseUI()">Polacz z Firebase</button>
+        <button class="btn" onclick="disconnectFirebaseUI()">Rozlacz (tryb lokalny)</button>
+        <div id="fb-status"></div>
+      </div>
+
+      <hr class="div">
+      <div class="ptitle">Kopia zapasowa</div>
+      <button class="btn" onclick="exportData()">Eksportuj dane (JSON)</button>
+      <button class="btn" onclick="document.getElementById('importjson').click()">Importuj dane (JSON)</button>
+      <input type="file" id="importjson" accept=".json" onchange="importData(this)">
+    </div>
+  </div>
+
+  <!-- right column -->
+  <div class="rpanel">
+    <div class="panel">
+      <div class="ptitle">
+        Wizualizacja 3D
+        <span class="ptitle-note">&mdash; przeciagnij aby obrocic &middot; scroll = zoom</span>
+      </div>
+      <div id="viewer">
+        <div class="hint3d">przeciagnij / scroll</div>
+      </div>
+      <div class="leg" id="leg"></div>
+    </div>
+
+    <div class="panel">
+      <div class="ptitle">Podsumowanie wysylki</div>
+      <div id="summary" class="empty">Dodaj produkty i zatwierdz karton</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/firebase.js"></script>
+<script src="js/scene3d.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
