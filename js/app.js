@@ -398,18 +398,16 @@ async function init() {
   initScene();
   refreshScene();
 
-  const saved = getSavedConfig();
-  if (saved) {
-    document.getElementById('fb-apikey').value    = saved.apiKey    || '';
-    document.getElementById('fb-projectid').value = saved.projectId || '';
-    document.getElementById('fb-appid').value     = saved.appId     || '';
-    try {
-      await connectFirebase(saved.apiKey, saved.projectId, saved.appId,
-        products => { if (products) { S.products = products; renderPlist(''); renderNoDims(); } },
-        boxes    => { if (boxes)    { S.boxes    = boxes;    renderBoxes(); } }
-      );
-    } catch { /* offline fallback */ }
-  }
+  const onProducts = products => { if (products) { S.products = products; renderPlist(''); renderNoDims(); } };
+  const onBoxes    = boxes    => { if (boxes)    { S.boxes    = boxes;    renderBoxes(); } };
+
+  const cfg = getSavedConfig() || FB_DEFAULT_CONFIG;
+  document.getElementById('fb-apikey').value    = cfg.apiKey    || '';
+  document.getElementById('fb-projectid').value = cfg.projectId || '';
+  document.getElementById('fb-appid').value     = cfg.appId     || '';
+  try {
+    await connectFirebase(cfg.apiKey, cfg.projectId, cfg.appId, onProducts, onBoxes);
+  } catch { /* offline fallback */ }
 }
 
 document.addEventListener('DOMContentLoaded', init);
