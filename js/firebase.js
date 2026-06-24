@@ -1,5 +1,13 @@
 const FB_LS_KEY = 'aledeska_fb_cfg';
 
+const FB_DEFAULT_CONFIG = {
+  apiKey:        'AIzaSyC_R52ydCLoRK98qh6rFCswG_qCoPBr-T0',
+  projectId:     'asystent-pakowania',
+  appId:         '1:501177505134:web:cad2810d5378cdfa979d7f',
+  authDomain:    'asystent-pakowania.firebaseapp.com',
+  storageBucket: 'asystent-pakowania.appspot.com',
+};
+
 let db = null;
 let unsubscribers = [];
 
