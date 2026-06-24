@@ -67,7 +67,7 @@ function updateCamera() {
   camera.lookAt(0, 0, 0);
 }
 
-function renderFrame() { renderer.render(scene, camera); }
+function renderFrame() { if (renderer && scene && camera) renderer.render(scene, camera); }
 
 function getNDC(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
@@ -401,6 +401,7 @@ function makeEdges(w, h, d, color, opacity) {
 }
 
 function buildScene(order, box, placements) {
+  if (!scene || !renderer) return; // not yet initialized — skip silently
   const toRemove = [];
   scene.traverse(o => { if (o.isMesh || o.isLineSegments) toRemove.push(o); });
   toRemove.forEach(o => scene.remove(o));
