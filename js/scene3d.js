@@ -1,7 +1,12 @@
 let renderer, scene, camera;
-let isDragging = false;
-let prevMouse  = { x: 0, y: 0 };
-let spherical  = { theta: Math.PI / 4, phi: Math.PI / 3, radius: 120 };
+let isDragging   = false;
+let prevMouse    = { x: 0, y: 0 };
+let spherical    = { theta: Math.PI / 4, phi: Math.PI / 3, radius: 120 };
+let selectedMesh = null;
+let productMeshes = [];
+let raycaster, mouse;
+let dragPlane, dragOffset;
+let isMovingProduct = false;
 
 function initScene() {
   const viewer = document.getElementById('viewer');
@@ -19,15 +24,18 @@ function initScene() {
   camera = new THREE.PerspectiveCamera(45, viewer.clientWidth / (viewer.clientHeight || 400), 0.1, 2000);
   updateCamera();
 
-  const ambient = new THREE.AmbientLight(0xffffff, 0.5);
-  scene.add(ambient);
+  raycaster = new THREE.Raycaster();
+  mouse     = new THREE.Vector2();
+  dragPlane = new THREE.Plane();
+  dragOffset = new THREE.Vector3();
 
+  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+  scene.add(ambient);
   const sun = new THREE.DirectionalLight(0xffffff, 0.9);
   sun.position.set(80, 120, 80);
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);
   scene.add(sun);
-
   const fill = new THREE.DirectionalLight(0xffffff, 0.3);
   fill.position.set(-60, 40, -60);
   scene.add(fill);
@@ -42,10 +50,7 @@ function resizeRenderer() {
   const w = viewer.clientWidth;
   const h = viewer.clientHeight || 400;
   renderer.setSize(w, h);
-  if (camera) {
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-  }
+  if (camera) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
 }
 
 function updateCamera() {
@@ -58,43 +63,128 @@ function updateCamera() {
   camera.lookAt(0, 0, 0);
 }
 
-function renderFrame() {
-  renderer.render(scene, camera);
+function renderFrame() { renderer.render(scene, camera); }
+
+function getNDC(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((clientX - rect.left) / rect.width)  *  2 - 1,
+    ((clientY - rect.top)  / rect.height) * -2 + 1
+  );
+}
+
+function pickProduct(clientX, clientY) {
+  const ndc = getNDC(clientX, clientY);
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(productMeshes, false);
+  return hits.length > 0 ? hits[0] : null;
+}
+
+function selectMesh(mesh) {
+  if (selectedMesh) {
+    selectedMesh.material.emissive.setHex(0x000000);
+    selectedMesh.material.emissiveIntensity = 0;
+  }
+  selectedMesh = mesh;
+  if (mesh) {
+    mesh.material.emissive.setHex(0xffffff);
+    mesh.material.emissiveIntensity = 0.25;
+  }
+  renderFrame();
 }
 
 function bindControls() {
   const el = renderer.domElement;
 
   el.addEventListener('mousedown', e => {
-    isDragging = true;
-    prevMouse  = { x: e.clientX, y: e.clientY };
-  });
-  window.addEventListener('mouseup', () => { isDragging = false; });
-  window.addEventListener('mousemove', e => {
-    if (!isDragging) return;
-    rotate(e.clientX - prevMouse.x, e.clientY - prevMouse.y);
+    const hit = pickProduct(e.clientX, e.clientY);
+    if (hit) {
+      selectMesh(hit.object);
+      isMovingProduct = true;
+      // drag plane perpendicular to camera through hit point
+      const normal = camera.position.clone().normalize();
+      dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
+      // offset = mesh center - hit point
+      dragOffset.copy(hit.object.position).sub(hit.point);
+    } else {
+      selectMesh(null);
+      isMovingProduct = false;
+      isDragging = true;
+    }
     prevMouse = { x: e.clientX, y: e.clientY };
   });
+
+  window.addEventListener('mouseup', () => {
+    isDragging      = false;
+    isMovingProduct = false;
+  });
+
+  window.addEventListener('mousemove', e => {
+    if (isMovingProduct && selectedMesh) {
+      const ndc = getNDC(e.clientX, e.clientY);
+      raycaster.setFromCamera(ndc, camera);
+      const target = new THREE.Vector3();
+      raycaster.ray.intersectPlane(dragPlane, target);
+      if (target) {
+        selectedMesh.position.copy(target.add(dragOffset));
+        // sync edge helper
+        const idx = productMeshes.indexOf(selectedMesh);
+        if (idx >= 0 && productEdges[idx]) {
+          productEdges[idx].position.copy(selectedMesh.position);
+        }
+        renderFrame();
+      }
+    } else if (isDragging) {
+      rotate(e.clientX - prevMouse.x, e.clientY - prevMouse.y);
+      prevMouse = { x: e.clientX, y: e.clientY };
+    }
+  });
+
   el.addEventListener('wheel', e => {
     e.preventDefault();
     zoom(e.deltaY * 0.2);
   }, { passive: false });
 
+  // touch
   let lastDist = 0;
   el.addEventListener('touchstart', e => {
     if (e.touches.length === 1) {
-      isDragging = true;
-      prevMouse  = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      const t = e.touches[0];
+      const hit = pickProduct(t.clientX, t.clientY);
+      if (hit) {
+        selectMesh(hit.object);
+        isMovingProduct = true;
+        const normal = camera.position.clone().normalize();
+        dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
+        dragOffset.copy(hit.object.position).sub(hit.point);
+      } else {
+        selectMesh(null);
+        isMovingProduct = false;
+        isDragging = true;
+      }
+      prevMouse = { x: t.clientX, y: t.clientY };
     }
-    if (e.touches.length === 2) {
-      lastDist = touchDist(e);
-    }
+    if (e.touches.length === 2) lastDist = touchDist(e);
   }, { passive: true });
 
   el.addEventListener('touchmove', e => {
-    if (e.touches.length === 1 && isDragging) {
-      rotate(e.touches[0].clientX - prevMouse.x, e.touches[0].clientY - prevMouse.y);
-      prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      if (isMovingProduct && selectedMesh) {
+        const ndc = getNDC(t.clientX, t.clientY);
+        raycaster.setFromCamera(ndc, camera);
+        const target = new THREE.Vector3();
+        raycaster.ray.intersectPlane(dragPlane, target);
+        if (target) {
+          selectedMesh.position.copy(target.add(dragOffset));
+          const idx = productMeshes.indexOf(selectedMesh);
+          if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
+          renderFrame();
+        }
+      } else if (isDragging) {
+        rotate(t.clientX - prevMouse.x, t.clientY - prevMouse.y);
+        prevMouse = { x: t.clientX, y: t.clientY };
+      }
     }
     if (e.touches.length === 2) {
       const d = touchDist(e);
@@ -103,7 +193,7 @@ function bindControls() {
     }
   }, { passive: true });
 
-  el.addEventListener('touchend', () => { isDragging = false; }, { passive: true });
+  el.addEventListener('touchend', () => { isDragging = false; isMovingProduct = false; }, { passive: true });
 }
 
 function rotate(dx, dy) {
@@ -126,17 +216,22 @@ function touchDist(e) {
   );
 }
 
-function makeEdges(w, h, d, color, opacity = 1) {
+function makeEdges(w, h, d, color, opacity) {
   const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d));
-  const mat = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
+  const mat = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity: opacity || 1 });
   return new THREE.LineSegments(geo, mat);
 }
 
-function buildScene(order, box) {
-  // remove old meshes
+let productEdges = [];
+
+function buildScene(order, box, placements) {
+  // clear old meshes
   const toRemove = [];
   scene.traverse(o => { if (o.isMesh || o.isLineSegments) toRemove.push(o); });
   toRemove.forEach(o => scene.remove(o));
+  productMeshes = [];
+  productEdges  = [];
+  selectedMesh  = null;
 
   if (!box && !order.length) { renderFrame(); return; }
 
@@ -148,52 +243,72 @@ function buildScene(order, box) {
 
   // carton shell
   const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xd4c9b0, transparent: true, opacity: 0.12, side: THREE.BackSide,
+    color: 0xd4c9b0, transparent: true, opacity: 0.1, side: THREE.BackSide,
   });
   const shell = new THREE.Mesh(new THREE.BoxGeometry(bL, bH, bW), wallMat);
   shell.position.set(bL / 2, bH / 2, bW / 2);
   scene.add(shell);
 
-  const edgesBox = makeEdges(bL, bH, bW, 0x8a7560);
+  const edgesBox = makeEdges(bL, bH, bW, 0x8a7560, 1);
   edgesBox.position.copy(shell.position);
   scene.add(edgesBox);
 
   // floor
   const floorMat = new THREE.MeshStandardMaterial({
-    color: 0xc8bc9e, transparent: true, opacity: 0.3, side: THREE.DoubleSide,
+    color: 0xc8bc9e, transparent: true, opacity: 0.25, side: THREE.DoubleSide,
   });
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(bL, bW), floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(bL / 2, 0, bW / 2);
   scene.add(floor);
 
-  // products
-  const PAD = 0.5;
-  let curY = PAD;
+  // products — use placements if available, else simple stack
+  if (placements && placements.length) {
+    let idx = 0;
+    order.forEach((item, pi) => {
+      const color = PROD_COLORS_HEX[pi % PROD_COLORS_HEX.length];
+      for (let i = 0; i < item.qty; i++) {
+        const pl = placements[idx++];
+        if (!pl) return;
+        const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05 });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl.l, pl.h, pl.w), mat);
+        mesh.position.set(pl.x + pl.l / 2, pl.z + pl.h / 2, pl.y + pl.w / 2);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.userData.productIdx = pi;
+        scene.add(mesh);
+        productMeshes.push(mesh);
 
-  order.forEach((item, idx) => {
-    const color = PROD_COLORS_HEX[idx % PROD_COLORS_HEX.length];
-    const pl    = Math.min(item.l || 10, bL - PAD * 2);
-    const pw    = Math.min(item.w || 10, bW - PAD * 2);
-    const ph    = item.h || 3;
-
-    for (let i = 0; i < item.qty; i++) {
-      if (curY + ph > bH) break;
-
-      const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05 });
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl, ph, pw), mat);
-      mesh.position.set(PAD + pl / 2, curY + ph / 2, PAD + pw / 2);
-      mesh.castShadow    = true;
-      mesh.receiveShadow = true;
-      scene.add(mesh);
-
-      const pe = makeEdges(pl, ph, pw, 0x000000, 0.12);
-      pe.position.copy(mesh.position);
-      scene.add(pe);
-
-      curY += ph;
-    }
-  });
+        const pe = makeEdges(pl.l, pl.h, pl.w, 0x000000, 0.1);
+        pe.position.copy(mesh.position);
+        scene.add(pe);
+        productEdges.push(pe);
+      }
+    });
+  } else {
+    // fallback: simple stack
+    let curY = 0;
+    order.forEach((item, pi) => {
+      const color = PROD_COLORS_HEX[pi % PROD_COLORS_HEX.length];
+      const pl = Math.min(item.l || 10, bL);
+      const pw = Math.min(item.w || 10, bW);
+      const ph = item.h || 3;
+      for (let i = 0; i < item.qty; i++) {
+        if (curY + ph > bH) break;
+        const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05 });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl, ph, pw), mat);
+        mesh.position.set(pl / 2, curY + ph / 2, pw / 2);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.userData.productIdx = pi;
+        scene.add(mesh);
+        productMeshes.push(mesh);
+        const pe = makeEdges(pl, ph, pw, 0x000000, 0.1);
+        pe.position.copy(mesh.position);
+        scene.add(pe);
+        productEdges.push(pe);
+        curY += ph;
+      }
+    });
+  }
 
   // fit camera
   const diag = Math.sqrt(bL * bL + bH * bH + bW * bW);
