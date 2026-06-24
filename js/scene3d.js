@@ -1,12 +1,13 @@
 let renderer, scene, camera;
-let isDragging   = false;
-let prevMouse    = { x: 0, y: 0 };
-let spherical    = { theta: Math.PI / 4, phi: Math.PI / 3, radius: 120 };
-let selectedMesh = null;
-let productMeshes = [];
-let raycaster, mouse;
-let dragPlane, dragOffset;
+let isDragging      = false;
+let prevMouse       = { x: 0, y: 0 };
+let spherical       = { theta: Math.PI / 4, phi: Math.PI / 3, radius: 120 };
+let selectedMesh    = null;
+let productMeshes   = [];
+let productEdges    = [];
+let raycaster, dragPlane, dragOffset;
 let isMovingProduct = false;
+let boxBounds       = { l: 0, w: 0, h: 0 };
 
 function initScene() {
   const viewer = document.getElementById('viewer');
@@ -24,9 +25,8 @@ function initScene() {
   camera = new THREE.PerspectiveCamera(45, viewer.clientWidth / (viewer.clientHeight || 400), 0.1, 2000);
   updateCamera();
 
-  raycaster = new THREE.Raycaster();
-  mouse     = new THREE.Vector2();
-  dragPlane = new THREE.Plane();
+  raycaster  = new THREE.Raycaster();
+  dragPlane  = new THREE.Plane();
   dragOffset = new THREE.Vector3();
 
   const ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -74,10 +74,58 @@ function getNDC(clientX, clientY) {
 }
 
 function pickProduct(clientX, clientY) {
-  const ndc = getNDC(clientX, clientY);
-  raycaster.setFromCamera(ndc, camera);
+  raycaster.setFromCamera(getNDC(clientX, clientY), camera);
   const hits = raycaster.intersectObjects(productMeshes, false);
   return hits.length > 0 ? hits[0] : null;
+}
+
+function getMeshDims(mesh) {
+  const geo = mesh.geometry;
+  geo.computeBoundingBox();
+  const s = new THREE.Vector3();
+  geo.boundingBox.getSize(s);
+  return s;
+}
+
+function clampToBounds(mesh) {
+  const dims = getMeshDims(mesh);
+  const hw = dims.x / 2, hh = dims.y / 2, hd = dims.z / 2;
+  const sceneOff = scene.position;
+  const minX = -sceneOff.x + hw;
+  const maxX = boxBounds.l - sceneOff.x - hw;
+  const minY = -sceneOff.y + hh;
+  const maxY = boxBounds.h - sceneOff.y - hh;
+  const minZ = -sceneOff.z + hd;
+  const maxZ = boxBounds.w - sceneOff.z - hd;
+  mesh.position.x = Math.max(minX, Math.min(maxX, mesh.position.x));
+  mesh.position.y = Math.max(minY, Math.min(maxY, mesh.position.y));
+  mesh.position.z = Math.max(minZ, Math.min(maxZ, mesh.position.z));
+}
+
+function getAABB(mesh) {
+  const dims = getMeshDims(mesh);
+  const p    = mesh.position;
+  return {
+    minX: p.x - dims.x / 2, maxX: p.x + dims.x / 2,
+    minY: p.y - dims.y / 2, maxY: p.y + dims.y / 2,
+    minZ: p.z - dims.z / 2, maxZ: p.z + dims.z / 2,
+  };
+}
+
+function aabbOverlap(a, b, margin) {
+  const m = margin || 0.1;
+  return a.maxX > b.minX + m && a.minX < b.maxX - m &&
+         a.maxY > b.minY + m && a.minY < b.maxY - m &&
+         a.maxZ > b.minZ + m && a.minZ < b.maxZ - m;
+}
+
+function hasCollision(mesh) {
+  const a = getAABB(mesh);
+  for (const other of productMeshes) {
+    if (other === mesh) continue;
+    if (aabbOverlap(a, getAABB(other))) return true;
+  }
+  return false;
 }
 
 function selectMesh(mesh) {
@@ -88,23 +136,66 @@ function selectMesh(mesh) {
   selectedMesh = mesh;
   if (mesh) {
     mesh.material.emissive.setHex(0xffffff);
-    mesh.material.emissiveIntensity = 0.25;
+    mesh.material.emissiveIntensity = 0.22;
   }
+  updateRotateBtn();
+  renderFrame();
+}
+
+function updateRotateBtn() {
+  const btn = document.getElementById('rotate-btn');
+  if (btn) btn.style.display = selectedMesh ? 'inline-block' : 'none';
+}
+
+function rotateMesh90() {
+  if (!selectedMesh) return;
+  const geo  = selectedMesh.geometry;
+  geo.computeBoundingBox();
+  const size = new THREE.Vector3();
+  geo.boundingBox.getSize(size);
+  const oldL = size.x, oldW = size.z;
+  const saved = selectedMesh.position.clone();
+
+  selectedMesh.geometry = new THREE.BoxGeometry(oldW, size.y, oldL);
+  clampToBounds(selectedMesh);
+
+  const idx = productMeshes.indexOf(selectedMesh);
+  if (idx >= 0 && productEdges[idx]) {
+    scene.remove(productEdges[idx]);
+    const pe = makeEdges(oldW, size.y, oldL, 0x000000, 0.1);
+    pe.position.copy(selectedMesh.position);
+    scene.add(pe);
+    productEdges[idx] = pe;
+  }
+
+  if (hasCollision(selectedMesh)) {
+    selectedMesh.geometry = new THREE.BoxGeometry(oldL, size.y, oldW);
+    selectedMesh.position.copy(saved);
+    clampToBounds(selectedMesh);
+    if (idx >= 0 && productEdges[idx]) {
+      scene.remove(productEdges[idx]);
+      const pe = makeEdges(oldL, size.y, oldW, 0x000000, 0.1);
+      pe.position.copy(selectedMesh.position);
+      scene.add(pe);
+      productEdges[idx] = pe;
+    }
+  }
+
   renderFrame();
 }
 
 function bindControls() {
   const el = renderer.domElement;
+  let lastValidPos = new THREE.Vector3();
 
   el.addEventListener('mousedown', e => {
     const hit = pickProduct(e.clientX, e.clientY);
     if (hit) {
       selectMesh(hit.object);
       isMovingProduct = true;
-      // drag plane perpendicular to camera through hit point
+      lastValidPos.copy(hit.object.position);
       const normal = camera.position.clone().normalize();
       dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
-      // offset = mesh center - hit point
       dragOffset.copy(hit.object.position).sub(hit.point);
     } else {
       selectMesh(null);
@@ -115,23 +206,31 @@ function bindControls() {
   });
 
   window.addEventListener('mouseup', () => {
-    isDragging      = false;
+    if (isMovingProduct && selectedMesh) {
+      clampToBounds(selectedMesh);
+      if (hasCollision(selectedMesh)) {
+        selectedMesh.position.copy(lastValidPos);
+        clampToBounds(selectedMesh);
+      }
+      const idx = productMeshes.indexOf(selectedMesh);
+      if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
+      renderFrame();
+    }
+    isDragging = false;
     isMovingProduct = false;
   });
 
   window.addEventListener('mousemove', e => {
     if (isMovingProduct && selectedMesh) {
-      const ndc = getNDC(e.clientX, e.clientY);
-      raycaster.setFromCamera(ndc, camera);
+      raycaster.setFromCamera(getNDC(e.clientX, e.clientY), camera);
       const target = new THREE.Vector3();
-      raycaster.ray.intersectPlane(dragPlane, target);
-      if (target) {
-        selectedMesh.position.copy(target.add(dragOffset));
-        // sync edge helper
+      if (raycaster.ray.intersectPlane(dragPlane, target)) {
+        const newPos = target.add(dragOffset);
+        selectedMesh.position.copy(newPos);
+        clampToBounds(selectedMesh);
+        if (!hasCollision(selectedMesh)) lastValidPos.copy(selectedMesh.position);
         const idx = productMeshes.indexOf(selectedMesh);
-        if (idx >= 0 && productEdges[idx]) {
-          productEdges[idx].position.copy(selectedMesh.position);
-        }
+        if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
         renderFrame();
       }
     } else if (isDragging) {
@@ -145,15 +244,15 @@ function bindControls() {
     zoom(e.deltaY * 0.2);
   }, { passive: false });
 
-  // touch
   let lastDist = 0;
   el.addEventListener('touchstart', e => {
     if (e.touches.length === 1) {
-      const t = e.touches[0];
+      const t   = e.touches[0];
       const hit = pickProduct(t.clientX, t.clientY);
       if (hit) {
         selectMesh(hit.object);
         isMovingProduct = true;
+        lastValidPos.copy(hit.object.position);
         const normal = camera.position.clone().normalize();
         dragPlane.setFromNormalAndCoplanarPoint(normal, hit.point);
         dragOffset.copy(hit.object.position).sub(hit.point);
@@ -171,12 +270,12 @@ function bindControls() {
     if (e.touches.length === 1) {
       const t = e.touches[0];
       if (isMovingProduct && selectedMesh) {
-        const ndc = getNDC(t.clientX, t.clientY);
-        raycaster.setFromCamera(ndc, camera);
+        raycaster.setFromCamera(getNDC(t.clientX, t.clientY), camera);
         const target = new THREE.Vector3();
-        raycaster.ray.intersectPlane(dragPlane, target);
-        if (target) {
+        if (raycaster.ray.intersectPlane(dragPlane, target)) {
           selectedMesh.position.copy(target.add(dragOffset));
+          clampToBounds(selectedMesh);
+          if (!hasCollision(selectedMesh)) lastValidPos.copy(selectedMesh.position);
           const idx = productMeshes.indexOf(selectedMesh);
           if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
           renderFrame();
@@ -193,7 +292,19 @@ function bindControls() {
     }
   }, { passive: true });
 
-  el.addEventListener('touchend', () => { isDragging = false; isMovingProduct = false; }, { passive: true });
+  el.addEventListener('touchend', () => {
+    if (isMovingProduct && selectedMesh) {
+      if (hasCollision(selectedMesh)) {
+        selectedMesh.position.copy(lastValidPos);
+        clampToBounds(selectedMesh);
+        const idx = productMeshes.indexOf(selectedMesh);
+        if (idx >= 0 && productEdges[idx]) productEdges[idx].position.copy(selectedMesh.position);
+        renderFrame();
+      }
+    }
+    isDragging = false;
+    isMovingProduct = false;
+  }, { passive: true });
 }
 
 function rotate(dx, dy) {
@@ -222,28 +333,26 @@ function makeEdges(w, h, d, color, opacity) {
   return new THREE.LineSegments(geo, mat);
 }
 
-let productEdges = [];
-
 function buildScene(order, box, placements) {
-  // clear old meshes
   const toRemove = [];
   scene.traverse(o => { if (o.isMesh || o.isLineSegments) toRemove.push(o); });
   toRemove.forEach(o => scene.remove(o));
   productMeshes = [];
   productEdges  = [];
   selectedMesh  = null;
+  updateRotateBtn();
 
   if (!box && !order.length) { renderFrame(); return; }
 
   const bL = box ? box.l : 60;
   const bW = box ? box.w : 50;
   const bH = box ? box.h : 40;
+  boxBounds = { l: bL, w: bW, h: bH };
 
   scene.position.set(-bL / 2, -bH / 2, -bW / 2);
 
-  // carton shell
   const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xd4c9b0, transparent: true, opacity: 0.1, side: THREE.BackSide,
+    color: 0xd4c9b0, transparent: true, opacity: 0.08, side: THREE.BackSide,
   });
   const shell = new THREE.Mesh(new THREE.BoxGeometry(bL, bH, bW), wallMat);
   shell.position.set(bL / 2, bH / 2, bW / 2);
@@ -253,7 +362,6 @@ function buildScene(order, box, placements) {
   edgesBox.position.copy(shell.position);
   scene.add(edgesBox);
 
-  // floor
   const floorMat = new THREE.MeshStandardMaterial({
     color: 0xc8bc9e, transparent: true, opacity: 0.25, side: THREE.DoubleSide,
   });
@@ -262,7 +370,6 @@ function buildScene(order, box, placements) {
   floor.position.set(bL / 2, 0, bW / 2);
   scene.add(floor);
 
-  // products — use placements if available, else simple stack
   if (placements && placements.length) {
     let idx = 0;
     order.forEach((item, pi) => {
@@ -274,10 +381,8 @@ function buildScene(order, box, placements) {
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl.l, pl.h, pl.w), mat);
         mesh.position.set(pl.x + pl.l / 2, pl.z + pl.h / 2, pl.y + pl.w / 2);
         mesh.castShadow = mesh.receiveShadow = true;
-        mesh.userData.productIdx = pi;
         scene.add(mesh);
         productMeshes.push(mesh);
-
         const pe = makeEdges(pl.l, pl.h, pl.w, 0x000000, 0.1);
         pe.position.copy(mesh.position);
         scene.add(pe);
@@ -285,7 +390,6 @@ function buildScene(order, box, placements) {
       }
     });
   } else {
-    // fallback: simple stack
     let curY = 0;
     order.forEach((item, pi) => {
       const color = PROD_COLORS_HEX[pi % PROD_COLORS_HEX.length];
@@ -298,7 +402,6 @@ function buildScene(order, box, placements) {
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(pl, ph, pw), mat);
         mesh.position.set(pl / 2, curY + ph / 2, pw / 2);
         mesh.castShadow = mesh.receiveShadow = true;
-        mesh.userData.productIdx = pi;
         scene.add(mesh);
         productMeshes.push(mesh);
         const pe = makeEdges(pl, ph, pw, 0x000000, 0.1);
@@ -310,7 +413,6 @@ function buildScene(order, box, placements) {
     });
   }
 
-  // fit camera
   const diag = Math.sqrt(bL * bL + bH * bH + bW * bW);
   spherical.radius = diag * 1.1;
   updateCamera();
