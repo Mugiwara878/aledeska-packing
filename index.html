@@ -144,7 +144,10 @@
       <div id="viewer">
         <div class="hint3d">kliknij produkt = zaznacz &amp; przesun &middot; scroll = zoom</div>
       </div>
-      <div class="leg" id="leg"></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0">
+        <button id="rotate-btn" onclick="rotateMesh90()" style="display:none;padding:5px 12px;font-size:12px;font-weight:600;border:1px solid #d0cbc2;border-radius:7px;background:#fff;cursor:pointer;font-family:inherit;flex-shrink:0">Obróć 90°</button>
+        <div class="leg" id="leg" style="flex:1"></div>
+      </div>
     </div>
 
     <div class="panel">
