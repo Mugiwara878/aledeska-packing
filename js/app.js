@@ -104,6 +104,59 @@ function renderPlist(q) {
   }).join('');
 }
 
+// ── product admin list (Import tab) ───────────────────────────
+
+function renderProdListAdmin() {
+  const el = document.getElementById('prod-list-admin');
+  if (!el) return;
+
+  const count = document.getElementById('prod-count');
+  if (count) count.textContent = S.products.length + ' szt.';
+
+  if (!S.products.length) {
+    el.innerHTML = '<div class="empty">Brak produktow</div>';
+    return;
+  }
+
+  el.innerHTML = S.products.map(p => {
+    const hasDims = p.l && p.w && p.h;
+    const dimColor = hasDims ? '#999' : '#c0392b';
+    const dims = hasDims
+      ? `${p.l}&times;${p.w}&times;${p.h} cm`
+      : 'brak wymiarow';
+    return `<label class="prod-admin-row">
+      <input type="checkbox" class="prod-chk" data-id="${p.id}">
+      <div class="prod-admin-info">
+        <div class="prod-admin-name">${p.name}</div>
+        <div class="prod-admin-meta">${p.sku} &middot; <span style="color:${dimColor}">${dims}</span> &middot; ${p.waga} kg</div>
+      </div>
+    </label>`;
+  }).join('');
+}
+
+function prodSelectAll() {
+  document.querySelectorAll('.prod-chk').forEach(c => c.checked = true);
+}
+
+function prodSelectNone() {
+  document.querySelectorAll('.prod-chk').forEach(c => c.checked = false);
+}
+
+async function prodDeleteSelected() {
+  const ids = [...document.querySelectorAll('.prod-chk:checked')].map(c => c.dataset.id);
+  if (!ids.length) { alert('Nic nie zaznaczono.'); return; }
+  if (!await checkAdminPassword()) return;
+  if (!confirm(`Usunac ${ids.length} produkt${ids.length === 1 ? '' : ids.length < 5 ? 'y' : 'ow'}?`)) return;
+
+  S.products = S.products.filter(p => !ids.includes(p.id));
+  S.order    = S.order.filter(p => !ids.includes(p.id));
+  await persist();
+  renderPlist(document.querySelector('.srch')?.value?.toLowerCase() || '');
+  renderProdListAdmin();
+  renderOrder();
+  refreshScene();
+}
+
 // ── order ──────────────────────────────────────────────────────
 
 function addToOrder(id) {
@@ -492,9 +545,42 @@ function renderSummary(b, bb, tw) {
     <div class="summary-items">${items}</div>`;
 }
 
+// ── admin auth ─────────────────────────────────────────────────
+// Change ADMIN_HASH to sha256(your_password) — current: "aledeska2024"
+// To generate a new hash: https://emn178.github.io/online-tools/sha256.html
+
+const ADMIN_HASH = '97c369604a389a753fc03127905b2ad4523d04215ad4bcfee0d55b3f76654260'; // sha256("aledeska2024")
+
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256',
+    new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function isAdmin() {
+  return sessionStorage.getItem('aledeska_admin') === '1';
+}
+
+async function checkAdminPassword() {
+  if (isAdmin()) return true;
+  const pwd = prompt('Haslo administratora (kartony):');
+  if (!pwd) return false;
+  const hash = await sha256(pwd);
+  if (hash === ADMIN_HASH) {
+    sessionStorage.setItem('aledeska_admin', '1');
+    renderBoxes(); // refresh — show delete buttons
+    return true;
+  }
+  alert('Niepoprawne haslo.');
+  return false;
+}
+
 // ── boxes tab ──────────────────────────────────────────────────
 
 async function addBox() {
+  if (!await checkAdminPassword()) return;
+
   const name = document.getElementById('bn').value.trim();
   const l    = parseFloat(document.getElementById('bl').value);
   const w    = parseFloat(document.getElementById('bw').value);
@@ -512,7 +598,8 @@ async function addBox() {
   });
 }
 
-function removeBox(id) {
+async function removeBox(id) {
+  if (!await checkAdminPassword()) return;
   if (!confirm('Usunac karton?')) return;
   S.boxes = S.boxes.filter(x => x.id !== id);
   persist();
@@ -523,19 +610,30 @@ function renderBoxes() {
   const el = document.getElementById('blist');
   if (!S.boxes.length) { el.innerHTML = '<div class="empty">Brak kartonow</div>'; return; }
 
+  const admin = isAdmin();
   el.innerHTML = '<div class="blist-wrap">' +
     S.boxes.map(b => `
       <div class="blistitem">
         <span class="bbadge">${b.name}</span>
         <span class="blistitem-dims">${b.l}&times;${b.w}&times;${b.h} cm &middot; max ${b.maxW} kg</span>
-        <button class="rmv" onclick="removeBox('${b.id}')">&times;</button>
+        ${admin ? `<button class="rmv" onclick="removeBox('${b.id}')">&times;</button>` : ''}
       </div>`).join('') +
     '</div>';
+
+  // Show/hide add-box form based on admin status
+  const form = document.getElementById('box-add-form');
+  if (form) form.style.display = admin ? 'flex' : 'none';
+
+  // Show lock indicator when not admin
+  const lockMsg = document.getElementById('box-lock-msg');
+  if (lockMsg) lockMsg.style.display = admin ? 'none' : 'block';
 }
 
 // ── import / export ────────────────────────────────────────────
 
-function importCSV(inp) {
+async function importCSV(inp) {
+  if (!await checkAdminPassword()) { inp.value = ''; return; }
+
   const file = inp.files[0];
   if (!file) return;
   document.getElementById('impstatus').innerHTML = '<div class="alert aw">Wczytywanie...</div>';
@@ -559,13 +657,17 @@ function importCSV(inp) {
         waga: sf(wS), l: sf(dS), w: sf(sS), h: sf(hS),
       };
 
-      const ex = S.products.find(x => x.sku === sku || x.id === id);
-      if (ex) { Object.assign(ex, prod); updated++; }
-      else    { S.products.push(prod);   added++; }
+      // nadpisz po SKU (priorytet) lub ID
+      const ex = S.products.find(x => x.sku === sku);
+      const exId = !ex ? S.products.find(x => x.id === id) : null;
+      if (ex)   { Object.assign(ex,   prod); updated++; }
+      else if (exId) { Object.assign(exId, prod); updated++; }
+      else      { S.products.push(prod);    added++; }
     });
 
     await persist();
     renderPlist('');
+    renderProdListAdmin();
     renderNoDims();
     document.getElementById('impstatus').innerHTML =
       `<div class="alert aok">${added} nowych, ${updated} zaktualizowanych${skipped ? ', ' + skipped + ' pominieto' : ''}</div>`;
@@ -595,7 +697,8 @@ function exportData() {
   a.click();
 }
 
-function importData(inp) {
+async function importData(inp) {
+  if (!await checkAdminPassword()) { inp.value = ''; return; }
   const file = inp.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -607,6 +710,7 @@ function importData(inp) {
       await persist();
       renderPlist('');
       renderBoxes();
+      renderProdListAdmin();
       renderNoDims();
       alert('Dane zaimportowane.');
     } catch {
@@ -685,6 +789,7 @@ async function init() {
 
   renderPlist('');
   renderBoxes();
+  renderProdListAdmin();
   renderNoDims();
   initScene();
   refreshScene();
