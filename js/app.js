@@ -129,64 +129,149 @@ function renderOrder() {
   document.getElementById('titms').textContent = totalI + ' szt.';
 }
 
-// ── bounding box ───────────────────────────────────────────────
+// ── bin packing ────────────────────────────────────────────────
 
-function getBB() {
-  if (!S.order.length) return null;
-  let maxL = 0, maxW = 0, totH = 0, totWgt = 0;
+function flattenOrder() {
+  const items = [];
   S.order.forEach(p => {
     for (let i = 0; i < p.qty; i++) {
-      if ((p.l || 0) > maxL) maxL = p.l || 0;
-      if ((p.w || 0) > maxW) maxW = p.w || 0;
-      totH   += p.h   || 0;
-      totWgt += p.waga;
+      items.push({ l: p.l || 10, w: p.w || 10, h: p.h || 3, waga: p.waga, name: p.name, sku: p.sku });
     }
   });
+  return items;
+}
+
+function packIntoBox(items, boxL, boxW) {
+  // greedy shelf packing: place items row by row on each layer
+  // returns array of {x, y, z, l, w, h} placements or null if doesnt fit
+  const sorted = [...items].sort((a, b) => (b.l * b.w) - (a.l * a.w));
+  const placements = [];
+  let curZ = 0;
+
+  while (sorted.length > 0) {
+    // start new layer
+    const layerH = sorted[0].h;
+    let curX = 0, curY = 0, rowH = 0;
+
+    const remaining = [];
+    for (const item of sorted) {
+      if (item.l <= boxL && item.w <= boxW) {
+        // try to place in current row
+        if (curX + item.l <= boxL) {
+          placements.push({ x: curX, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
+          if (item.w > rowH) rowH = item.w;
+          curX += item.l;
+        } else if (curY + rowH + item.w <= boxW) {
+          // next row
+          curY += rowH;
+          curX  = item.l;
+          rowH  = item.w;
+          placements.push({ x: 0, y: curY, z: curZ, l: item.l, w: item.w, h: item.h });
+        } else {
+          remaining.push(item);
+        }
+      } else {
+        remaining.push(item);
+      }
+    }
+
+    if (remaining.length === sorted.length) return null; // nothing placed, infinite loop guard
+    sorted.length = 0;
+    sorted.push(...remaining);
+    curZ += layerH;
+  }
+
+  return { placements, totalH: curZ };
+}
+
+function packResult() {
+  const items = flattenOrder();
+  if (!items.length) return null;
+  const totalWgt = items.reduce((a, i) => a + i.waga, 0);
+
+  // find smallest fitting box
+  const candidates = S.boxes
+    .filter(b => b.maxW >= totalWgt + b.ow)
+    .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h);
+
+  for (const box of candidates) {
+    const result = packIntoBox(items, box.l, box.w);
+    if (result && result.totalH <= box.h) {
+      return { box, placements: result.placements, totalH: result.totalH, totalWgt };
+    }
+    // try rotated items
+    const rotated = items.map(i => ({ ...i, l: i.w, w: i.l }));
+    const result2 = packIntoBox(rotated, box.l, box.w);
+    if (result2 && result2.totalH <= box.h) {
+      return { box, placements: result2.placements, totalH: result2.totalH, totalWgt };
+    }
+  }
+  return null;
+}
+
+function getBB() {
+  const items = flattenOrder();
+  if (!items.length) return null;
+  const maxL  = Math.max(...items.map(i => i.l));
+  const maxW  = Math.max(...items.map(i => i.w));
+  const totH  = items.reduce((a, i) => a + i.h, 0);
+  const totWgt = items.reduce((a, i) => a + i.waga, 0);
   return { l: maxL, w: maxW, h: totH, wgt: totWgt };
 }
 
 function guessBestBox() {
-  const bb = getBB();
-  if (!bb) return null;
-  return S.boxes.find(b =>
-    b.l >= bb.l + 4 && b.w >= bb.w + 4 && b.h >= bb.h + 4 && b.maxW >= bb.wgt + b.ow
-  ) || S.boxes[S.boxes.length - 1];
+  const result = packResult();
+  return result ? result.box : (S.boxes[S.boxes.length - 1] || null);
 }
 
 // ── box proposal ───────────────────────────────────────────────
 
 function proposeBox() {
   if (!S.order.length) return;
-  const bb  = getBB();
-  const PAD = 4;
-  const opts = S.boxes
-    .filter(b => b.l >= bb.l + PAD && b.w >= bb.w + PAD && b.h >= bb.h + PAD && b.maxW >= bb.wgt + b.ow)
-    .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h);
-
   const optsEl = document.getElementById('bopts');
   const wrap   = document.getElementById('bproposal');
+  const items  = flattenOrder();
+  const totalWgt = items.reduce((a, i) => a + i.waga, 0);
 
-  if (!opts.length) {
+  const fitting = [];
+  S.boxes
+    .filter(b => b.maxW >= totalWgt + b.ow)
+    .sort((a, b) => a.l * a.w * a.h - b.l * b.w * b.h)
+    .forEach(b => {
+      const r = packIntoBox(items, b.l, b.w);
+      if (r && r.totalH <= b.h) {
+        fitting.push({ box: b, placements: r.placements, totalH: r.totalH });
+        return;
+      }
+      const rot = items.map(i => ({ ...i, l: i.w, w: i.l }));
+      const r2  = packIntoBox(rot, b.l, b.w);
+      if (r2 && r2.totalH <= b.h) {
+        fitting.push({ box: b, placements: r2.placements, totalH: r2.totalH });
+      }
+    });
+
+  if (!fitting.length) {
     optsEl.innerHTML = '<div class="alert aw">Zaden karton nie pasuje. Sprawdz wymiary lub dodaj wiekszy karton.</div>';
     wrap.style.display = 'block';
     return;
   }
 
-  optsEl.innerHTML = opts.slice(0, 5).map((b, i) => {
+  optsEl.innerHTML = fitting.slice(0, 5).map(({ box: b, totalH }, i) => {
     const vol  = b.l * b.w * b.h;
-    const fill = bb.l && bb.w && bb.h ? Math.round(bb.l * bb.w * bb.h / vol * 100) : 0;
+    const itemVol = items.reduce((a, it) => a + it.l * it.w * it.h, 0);
+    const fill = Math.round(itemVol / vol * 100);
     const best = i === 0 ? ' best' : '';
     const tag  = i === 0 ? '<span class="best-tag">najlepszy</span>' : '';
     return `<label class="bopt${best}">
       <input type="radio" name="bop" value="${b.id}" ${i === 0 ? 'checked' : ''} onchange="setSelBox('${b.id}')">
       <div class="bopt-info">
         <div class="bopt-name">${b.name} ${tag}</div>
-        <div class="bopt-dims">${b.l}&times;${b.w}&times;${b.h} cm &middot; max ${b.maxW} kg &middot; ~${fill}% wypelnienia</div>
+        <div class="bopt-dims">${b.l}&times;${b.w}&times;${b.h} cm &middot; max ${b.maxW} kg &middot; ~${fill}% wypelnienia &middot; uzyto ${totalH.toFixed(1)} cm wys.</div>
       </div>
     </label>`;
   }).join('');
 
-  S.selBox = opts[0].id;
+  S.selBox = fitting[0].box.id;
   wrap.style.display = 'block';
   document.getElementById('bconfirmed').style.display = 'none';
 }
@@ -374,8 +459,9 @@ function disconnectFirebaseUI() {
 // ── scene glue ─────────────────────────────────────────────────
 
 function refreshScene() {
-  const box = S.confBox || guessBestBox();
-  buildScene(S.order, box);
+  const result = packResult();
+  const box    = S.confBox || (result ? result.box : guessBestBox());
+  buildScene(S.order, box, result ? result.placements : null);
 
   document.getElementById('leg').innerHTML = S.order.map((p, i) =>
     `<div class="legit">
