@@ -677,16 +677,8 @@ async function importCSV(inp) {
 }
 
 function renderNoDims() {
-  const el = document.getElementById('nodims-list');
-  const nd = S.products.filter(p => !p.l || !p.w || !p.h);
-
-  if (!nd.length) {
-    el.innerHTML = '<div class="empty">Wszystkie produkty maja wymiary</div>';
-    return;
-  }
-
-  el.innerHTML = `<div class="nodims-count">${nd.length} produktow bez wymiarow:</div>` +
-    nd.map(p => `<div class="nodims-row">${p.sku} &mdash; ${p.name.substring(0, 45)}</div>`).join('');
+  // nodims-list removed — info now shown inline in prod-list-admin (red color)
+  renderProdListAdmin();
 }
 
 function exportData() {
@@ -790,12 +782,15 @@ async function init() {
   renderPlist('');
   renderBoxes();
   renderProdListAdmin();
-  renderNoDims();
-  initScene();
+  initScene();      // 3D musi byc przed jakimkolwiek refreshScene
   refreshScene();
 
-  const onProducts = products => { if (products) { S.products = products; renderPlist(''); renderNoDims(); } };
-  const onBoxes    = boxes    => { if (boxes)    { S.boxes    = boxes;    renderBoxes(); } };
+  const onProducts = products => {
+    if (products) { S.products = products; renderPlist(''); renderProdListAdmin(); }
+  };
+  const onBoxes = boxes => {
+    if (boxes) { S.boxes = boxes; renderBoxes(); }
+  };
 
   const cfg = getSavedConfig() || FB_DEFAULT_CONFIG;
   document.getElementById('fb-apikey').value    = cfg.apiKey    || '';
