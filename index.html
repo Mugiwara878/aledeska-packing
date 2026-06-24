@@ -71,7 +71,13 @@
 
       <hr class="div">
       <div class="ptitle">Dodaj karton</div>
-      <div class="bform">
+
+      <div id="box-lock-msg" class="alert aw" style="display:none; font-size:11px;">
+        🔒 Edycja kartonow wymaga hasla administratora.
+        <button class="btn" style="margin-top:6px;margin-bottom:0;" onclick="checkAdminPassword()">Odblokuj</button>
+      </div>
+
+      <div id="box-add-form" class="bform" style="display:none;">
         <div class="fg"><label>Nazwa</label><input type="text" id="bn" placeholder="np. Karton G"></div>
         <div class="fr3">
           <div class="fg"><label>Dl. cm</label><input type="number" id="bl" placeholder="60"></div>
@@ -103,8 +109,19 @@
       <div id="impstatus"></div>
 
       <hr class="div">
-      <div class="ptitle">Produkty bez wymiarow</div>
-      <div id="nodims-list" style="max-height: 180px; overflow-y: auto;"></div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <div class="ptitle" style="margin-bottom:0;">Aktywne produkty</div>
+        <span id="prod-count" style="font-size:10px;color:#999;"></span>
+      </div>
+
+      <div style="display:flex;gap:5px;margin-bottom:7px;flex-wrap:wrap;">
+        <button class="btn" style="flex:1;margin-bottom:0;font-size:11px;" onclick="prodSelectAll()">Zaznacz wszystkie</button>
+        <button class="btn" style="flex:1;margin-bottom:0;font-size:11px;" onclick="prodSelectNone()">Odznacz</button>
+        <button class="btn" style="flex:1;margin-bottom:0;font-size:11px;color:#c0392b;border-color:#e0a0a0;" onclick="prodDeleteSelected()">Usun zaznaczone</button>
+      </div>
+
+      <div id="prod-list-admin" style="max-height:320px;overflow-y:auto;border:1px solid #e0dbd2;border-radius:8px;"></div>
     </div>
 
     <!-- tab: firebase -->
@@ -167,6 +184,61 @@
 <script src="js/firebase.js"></script>
 <script src="js/scene3d.js"></script>
 <script src="js/app.js"></script>
+
+<!-- easter egg — type "zul" anywhere -->
+<div id="zul-overlay" style="
+  display:none; position:fixed; inset:0; z-index:9999;
+  background:rgba(0,0,0,0.92); align-items:center; justify-content:center;
+  flex-direction:column; font-family:system-ui,sans-serif; cursor:pointer;
+" onclick="closeZul()">
+  <div style="font-size:72px; animation:zul-spin 2s linear infinite;">🕺</div>
+  <div style="color:#fff; font-size:28px; font-weight:900; letter-spacing:.12em;
+              margin:16px 0 4px; text-transform:uppercase; animation:zul-pulse 0.5s ease infinite alternate;">
+    TECHNO ZUL
+  </div>
+  <div style="color:#aaa; font-size:12px; margin-bottom:18px;">kliknij zeby zamknac</div>
+  <iframe id="zul-yt" width="560" height="315"
+    src=""
+    allow="autoplay; encrypted-media"
+    allowfullscreen
+    style="border:3px solid #fff; border-radius:10px; box-shadow:0 0 40px #fff3;">
+  </iframe>
+</div>
+
+<style>
+@keyframes zul-spin  { to { transform: rotate(360deg); } }
+@keyframes zul-pulse { to { text-shadow: 0 0 30px #fff, 0 0 60px #8af; color:#8af; } }
+@keyframes zul-flash { 0%,100%{background:rgba(0,0,0,0.92)} 50%{background:rgba(20,0,40,0.97)} }
+#zul-overlay.active  { animation: zul-flash 0.4s ease infinite; }
+</style>
+
+<script>
+(function() {
+  const SEQ = 'zul';
+  let buf = '';
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    buf = (buf + e.key.toLowerCase()).slice(-SEQ.length);
+    if (buf === SEQ) openZul();
+  });
+
+  function openZul() {
+    const ov = document.getElementById('zul-overlay');
+    const yt = document.getElementById('zul-yt');
+    yt.src = 'https://www.youtube.com/embed/KSPxHniCtmw?autoplay=1&start=0';
+    ov.style.display = 'flex';
+    ov.classList.add('active');
+  }
+
+  window.closeZul = function() {
+    const ov = document.getElementById('zul-overlay');
+    const yt = document.getElementById('zul-yt');
+    ov.style.display = 'none';
+    ov.classList.remove('active');
+    yt.src = ''; // stop video
+  };
+})();
+</script>
 
 </body>
 </html>
