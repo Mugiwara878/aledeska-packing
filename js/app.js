@@ -545,11 +545,7 @@ function renderSummary(b, bb, tw) {
     <div class="summary-items">${items}</div>`;
 }
 
-// ── admin auth ─────────────────────────────────────────────────
-// Change ADMIN_HASH to sha256(your_password) — current: "aledeska2024"
-// To generate a new hash: https://emn178.github.io/online-tools/sha256.html
-
-const ADMIN_HASH = '97c369604a389a753fc03127905b2ad4523d04215ad4bcfee0d55b3f76654260'; // sha256("Wakacje88.")
+const ADMIN_HASH = 'e9491ad9d9e0ce297e80a9ab86e845e9bccdac27f603e6f5d4b551d0008d313f'; // sha256("Wakacje88.")
 
 async function sha256(str) {
   const buf = await crypto.subtle.digest('SHA-256',
